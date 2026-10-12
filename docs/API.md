@@ -202,3 +202,30 @@ AxisTransform提供matrix、determinant、changes_handedness只读属性，
 以及apply(point)、apply_orientation(quaternion)方法。常见输入错误抛ValueError或TypeError；纯数学工具不替代完整网络协议校验。
 姿态编码还可能向调用方返回pydantic.ValidationError（也是ValueError子类）。
 协议字段和字节偏移见[工程手册](reference/ARCHITECTURE.md)。
+
+## 姿态WebRTC信令（当前源码）
+
+`POST /api/webrtc/offer` 接收 `sdp`、`type="offer"`，以及可选的成对字段：
+
+| 字段 | 类型/约束 | 用途 |
+|---|---|---|
+| client_token | UUID字符串，最长36字符 | 页面随机生成且只保存在内存的接管凭据 |
+| attempt_id | 严格整数，1至2^53−1 | 同页面每次协商递增，识别过期/取消请求 |
+
+缺少整对字段的旧请求仍支持初次连接，不具备接管能力；只提供一个字段或字段非法返回422。
+返回仍仅含 `sdp` 和 `type="answer"`。相同凭据的更高代次撤销旧连接再预留新连接；
+其他来源占用、过期/取消代次或协商被新请求替换返回409，detail区分原因。
+旧源停止发布的暂行预算为1秒，超时503；失败时不建立第二个活动源。
+SDP协商和未完成数据通道握手仍各有10秒限制，不作为已建立旧peer的失联判定。
+
+`POST /api/webrtc/close` 接收必填 `client_token` 和 `attempt_id`，约束同上。
+仅当前凭据与代次同时匹配才关闭，返回 `{"closed": true}`；重复、迟到或尚无对应连接时
+返回 `{"closed": false}`，同时记录取消代次，防止close先到、offer后到时重新占用。
+最近64个页面的最高代次被保留；当前连接额外核对自身代次。
+close和offer的源撤销/预留串行化，后台资源收尾不占用信令锁。
+凭据不在响应、健康信息或姿态JSON中公开；持有凭据即可接管，不能视为设备认证。
+
+`WSS /ws` JSON附加 `ingress_connection_id`（服务端生成的UUID），每个姿态源连接不同，
+同源帧之间不变。它在下一有效新帧中反映来源切换，不是即时失效事件。
+消费者必须在编号变化时锁定许可，并继续执行收包超时与用户确认规则。
+QCRT输入布局保持v5/804字节。已冻结0.3.0产物未包含本次信令与JSON补丁。

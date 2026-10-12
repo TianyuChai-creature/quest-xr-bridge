@@ -54,11 +54,13 @@ async def check(url: str, context: ssl.SSLContext, seconds: float, inject: bool)
     ws_url = f"{'wss' if parsed.scheme == 'https' else 'ws'}://{parsed.netloc}/ws"
     peer = None
     sender = None
+    claim = None
     async with websockets.connect(
         ws_url, ssl=context if parsed.scheme == "https" else None
     ) as output:
         try:
             if inject:
+                claim = {"client_token": str(uuid.uuid4()), "attempt_id": 1}
                 peer = RTCPeerConnection(RTCConfiguration(iceServers=[]))
                 channel = peer.createDataChannel("pose", ordered=False, maxPacketLifeTime=30)
                 opened = asyncio.Event()
@@ -68,7 +70,7 @@ async def check(url: str, context: ssl.SSLContext, seconds: float, inject: bool)
                     request,
                     url + "/api/webrtc/offer",
                     context,
-                    {"sdp": peer.localDescription.sdp, "type": "offer"},
+                    {"sdp": peer.localDescription.sdp, "type": "offer", **claim},
                 )
                 await peer.setRemoteDescription(RTCSessionDescription(**answer))
                 await asyncio.wait_for(opened.wait(), 10)
@@ -96,7 +98,9 @@ async def check(url: str, context: ssl.SSLContext, seconds: float, inject: bool)
                     "shoulders",
                     "elbows",
                     "coordinate_transform",
+                    "ingress_connection_id",
                 } <= raw.keys()
+                uuid.UUID(raw["ingress_connection_id"])
                 for side in ("left", "right"):
                     assert len(raw["hands"][side]["landmarks"]) == 21
                     assert len(raw["hands"][side]["radii"]) == 21
@@ -116,7 +120,11 @@ async def check(url: str, context: ssl.SSLContext, seconds: float, inject: bool)
                 with contextlib.suppress(asyncio.CancelledError):
                     await sender
             if peer is not None:
-                await peer.close()
+                try:
+                    with contextlib.suppress(OSError):
+                        await asyncio.to_thread(request, url + "/api/webrtc/close", context, claim)
+                finally:
+                    await peer.close()
 
 
 def main():

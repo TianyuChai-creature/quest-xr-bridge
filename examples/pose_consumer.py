@@ -27,6 +27,7 @@ class PoseConsumerGate:
         """Call on a socket disconnect/reconnect or a supervised upstream source change."""
         self._stop()
         self.session_id = self.seq = None
+        self.connection_id = None
         self.tracked = {"left": False, "right": False}
 
     def set_inhibited(self, active: bool) -> None:
@@ -40,6 +41,10 @@ class PoseConsumerGate:
         self.allowed(now)  # A new packet must not erase a preceding receipt timeout.
         try:
             session_id = str(UUID(pose["session_id"]))
+            connection_id = (
+                str(UUID(pose["ingress_connection_id"]))
+                if "ingress_connection_id" in pose else None
+            )
             seq = pose["seq"]
             tracked = {side: pose["hands"][side]["tracked"] for side in self.tracked}
             if type(seq) is not int or not 0 < seq <= 0xFFFFFFFF:
@@ -49,12 +54,13 @@ class PoseConsumerGate:
         except (KeyError, TypeError, ValueError, AttributeError):
             self._stop()
             return False
-        if session_id != self.session_id:
+        if session_id != self.session_id or connection_id != self.connection_id:
             self.source_changed()
         elif self.seq is not None and seq <= self.seq:
             self._stop()
             return False
         self.session_id, self.seq, self.received_at = session_id, seq, now
+        self.connection_id = connection_id
         self.tracked = tracked
         for side in self.tracked:
             if not self.tracked[side]:

@@ -250,6 +250,75 @@ function checkCameraAndGuidesDrawOrder() {
   assert.deepEqual(hudAnchors, [headMatrix, headMatrix], "both eyes project the same head-anchored HUD geometry")
 }
 
+async function checkPoseReconnect() {
+  const html = fs.readFileSync(path.join(__dirname, "../static/index.html"), "utf8")
+  const source = html.slice(html.indexOf("let peerConnection = null"), html.indexOf("function readPose("))
+  const calls = [], peers = [], timers = new Map(), session = {}, token = "407b7a3f-4791-479c-aa81-48e813aca057"
+  let releaseOffer, rejectOffer = false
+  class Peer {
+    constructor() {
+      this.events = {}; peers.push(this)
+      this.channel = { readyState: "open", events: {},
+        addEventListener(name, fn) { this.events[name] = fn },
+        close() { this.readyState = "closed"; this.events.close?.() }, }
+    }
+    createDataChannel(label, options) {
+      assert.equal(label, "pose"); assert.equal(options.ordered, false)
+      assert.equal(options.maxPacketLifeTime, 30)
+      return this.channel
+    }
+    addEventListener(name, fn) { this.events[name] = fn }
+    async createOffer() { return { sdp: "offer", type: "offer" } }
+    async setLocalDescription(value) { this.localDescription = value }
+    async setRemoteDescription(value) { this.remoteDescription = value }
+    close() { this.closed = true }
+  }
+  const context = vm.createContext({ crypto: { randomUUID: () => token },
+    RTCPeerConnection: Peer, RTC_PACKET_LIFETIME_MS: 30, AbortController, AbortSignal,
+    enterButton: {}, sessionPhaseEl: {}, transportStatus: {}, session,
+    setTimeout(fn, ms) { const id = {}; timers.set(id, { fn, ms }); return id },
+    clearTimeout(id) { timers.delete(id) }, waitForIceGathering: async () => {},
+    offerError: async () => new Error("pose source is occupied by another page"),
+    async fetch(url, options) {
+      const body = JSON.parse(options.body)
+      calls.push({ url, body, keepalive: options.keepalive })
+      if (url.endsWith("close")) throw new Error("offline close notification")
+      if (body.attempt_id === 3) await new Promise(resolve => { releaseOffer = resolve })
+      return { ok: !rejectOffer, json: async () => ({ sdp: "answer", type: "answer" }) }
+    },
+  })
+  vm.runInContext(source + "\nxrSession = session; seq = 42", context)
+  await vm.runInContext("connectTransport()", context)
+  assert.deepEqual(calls[0].body, { sdp: "offer", type: "offer", client_token: token, attempt_id: 1 })
+  const old = peers[0]
+  old.channel.close()
+  assert.deepEqual(calls.at(-1), { url: "/api/webrtc/close", body: { client_token: token, attempt_id: 1 }, keepalive: true })
+  const retry = [...timers.values()].find(timer => timer.ms === 1000)
+  assert(retry, "a lost close notification still schedules reconnection")
+  await retry.fn()
+  assert.equal(calls.at(-1).body.attempt_id, 2)
+  assert.equal(calls.at(-1).body.client_token, token)
+  old.connectionState = "failed"; old.events.connectionstatechange(); old.channel.events.close()
+  assert.equal(peers[1].closed, undefined, "late old callbacks cannot close the new peer")
+  const pending = vm.runInContext("connectTransport()", context)
+  await new Promise(setImmediate)
+  assert(releaseOffer)
+  await vm.runInContext("connectTransport()", context)
+  releaseOffer(); await pending
+  assert.equal(vm.runInContext("poseClaim.attempt_id", context), 4)
+  assert.equal(peers[2].remoteDescription, undefined, "a superseded answer is ignored")
+  assert.equal(peers[3].closed, undefined)
+  assert.equal(vm.runInContext("xrSession", context), session)
+  assert.equal(vm.runInContext("seq", context), 42, "reconnection keeps XR session and sequence")
+  rejectOffer = true
+  await vm.runInContext("connectTransport()", context)
+  assert.equal(calls.at(-1).url, "/api/webrtc/close")
+  assert.equal(calls.at(-1).body.attempt_id, 5)
+  assert(vm.runInContext("transportStatus.textContent", context).includes("occupied"))
+  vm.runInContext("pageLeaving = true; clearTimeout(reconnectTimer); closeCurrentTransport()", context)
+  assert.equal(timers.size, 0)
+}
+
 function checkHudTextLayout() {
   const html = fs.readFileSync(path.join(__dirname, "../static/index.html"), "utf8")
   const source = html.slice(html.indexOf("function paintHud("), html.indexOf("function roundRect("))
@@ -266,9 +335,10 @@ function checkHudTextLayout() {
   assert.equal(text.slice(1).map(line => line.value).join(" "), "Pose disconnected: WebRTC channel timeout Camera video unavailable: decoded frame updates unsupported Body tracking unavailable Keep your upper body in view Hold a pose close to the robot arms Do not tap the UI")
 }
 
-checkPose().then(() => {
+checkPose().then(async () => {
+  await checkPoseReconnect()
   checkCameraAndGuidesDrawOrder()
   checkHudTextLayout()
   checkViewer()
-  console.log("XR fault HUD, pose isolation, preparation, cleanup and viewer freshness checks passed")
+  console.log("XR fault HUD, pose takeover, isolation, cleanup and viewer freshness checks passed")
 }).catch(error => { console.error(error); process.exitCode = 1 })

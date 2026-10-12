@@ -11,7 +11,9 @@ from uuid import UUID
 from pydantic import ValidationError
 from test_binary_protocol import pose_frame_v5
 
-from quest_xr_bridge.pose import CoordinateTransformRequest, PoseFrame, WebRTCOffer
+from quest_xr_bridge.pose import (
+    CoordinateTransformRequest, PoseFrame, PosePeerClose, WebRTCOffer, WebRTCPoseOffer,
+)
 
 
 class PoseProtocolTests(unittest.TestCase):
@@ -42,6 +44,7 @@ class PoseProtocolTests(unittest.TestCase):
                 ("GET", "/api/coordinate-transform"),
                 ("PUT", "/api/coordinate-transform"),
                 ("POST", "/api/webrtc/offer"),
+                ("POST", "/api/webrtc/close"),
                 ("POST", "/api/video/offer"),
                 ("POST", "/api/video/close"),
                 ("WS", "/ws"),
@@ -144,6 +147,23 @@ class PoseProtocolTests(unittest.TestCase):
             with self.subTest(request=request), self.assertRaises(ValidationError):
                 CoordinateTransformRequest.model_validate(request)
 
+    def test_pose_claim_is_paired_and_bounded_without_changing_video_or_legacy_offers(self):
+        token = "407b7a3f-4791-479c-aa81-48e813aca057"
+        base = {"sdp": "v=0", "type": "offer"}
+        self.assertIsNone(WebRTCPoseOffer(**base).client_token)
+        self.assertEqual(WebRTCPoseOffer(**base, client_token=token, attempt_id=1).attempt_id, 1)
+        for fields in (
+            {"client_token": token}, {"attempt_id": 1},
+            {"client_token": "invalid", "attempt_id": 1},
+            {"client_token": token * 2, "attempt_id": 1},
+            *({"client_token": token, "attempt_id": value}
+              for value in (0, -1, True, 1.5, "1", 2**53)),
+        ):
+            with self.subTest(fields=fields), self.assertRaises(ValidationError):
+                WebRTCPoseOffer(**base, **fields)
+            with self.assertRaises(ValidationError):
+                PosePeerClose(**fields)
+
 
 class PoseWebRTCIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_real_pose_channel_emits_complete_output_and_isolates_runtimes(self) -> None:
@@ -241,6 +261,7 @@ class PoseWebRTCIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(output["representation"], "hts-wrist-relative")
                 self.assertEqual(output["coordinate_transform"]["name"], "body")
                 self.assertEqual(output["ingress_transport"], "webrtc")
+                UUID(output["ingress_connection_id"])
                 self.assertIn("server_received_epoch_ms", output)
                 self.assertIn("estimated_transport_latency_ms", output)
                 for side in ("left", "right"):

@@ -57,6 +57,70 @@ class LatestIngressTests(unittest.TestCase):
             second.wait_closed(1)
         self.assertFalse(runtime.active_source.describe()["active"])
 
+    def test_slow_log_shutdown_does_not_hold_source_or_clear_replacement(self):
+        runtime = PoseRuntime(record_poses=True)
+        logging_started, release_log = threading.Event(), threading.Event()
+        with patch("quest_xr_bridge.runtime.AsyncPoseLog") as log:
+            log.return_value.dropped = 0
+            def wait_log():
+                logging_started.set()
+                release_log.wait(2)
+            log.return_value.wait_closed.side_effect = wait_log
+            first = PoseStreamProcessor(runtime, "old")
+            second = None
+            try:
+                first.close()
+                self.assertTrue(logging_started.wait(1))
+                self.assertFalse(runtime.active_source.describe()["active"])
+                with self.assertRaises(TimeoutError):
+                    first.wait_closed(0.01)
+                runtime.record_poses = False
+                second = PoseStreamProcessor(runtime, "new")
+                second._process(encode_pose_packet(pose_frame_v5()), 1, 1)
+                release_log.set()
+                first.wait_closed(1)
+                self.assertEqual(runtime.latest_pose.snapshot()[1]["seq"], 1234)
+                self.assertEqual(runtime.active_source.describe()["client"], "new")
+            finally:
+                release_log.set()
+                first.close()
+                first.wait_closed(1)
+                if second is not None:
+                    second.close()
+                    second.wait_closed(1)
+
+    def test_decode_in_flight_cannot_publish_after_source_replacement(self):
+        runtime = PoseRuntime()
+        decoding, release_decode = threading.Event(), threading.Event()
+        from quest_xr_bridge.binary_protocol import decode_pose_packet
+        def decode(data):
+            if int.from_bytes(data[8:12], "little") == 1234:
+                decoding.set()
+                release_decode.wait(2)
+            return decode_pose_packet(data)
+        with patch("quest_xr_bridge.runtime.decode_pose_packet", side_effect=decode):
+            first = PoseStreamProcessor(runtime, "old")
+            second = None
+            try:
+                first.process(encode_pose_packet(pose_frame_v5()), 1, 1)
+                self.assertTrue(decoding.wait(1))
+                first.close()
+                second = PoseStreamProcessor(runtime, "new")
+                frame = pose_frame_v5()
+                frame["seq"] = 1235
+                second._process(encode_pose_packet(frame), 2, 2)
+                release_decode.set()
+                first.wait_closed(1)
+                self.assertEqual(runtime.latest_pose.snapshot()[1]["seq"], 1235)
+                self.assertEqual(runtime.ingress.describe()["seq"], 1235)
+            finally:
+                release_decode.set()
+                first.close()
+                first.wait_closed(1)
+                if second is not None:
+                    second.close()
+                    second.wait_closed(1)
+
     def test_pending_burst_keeps_highest_sequence(self):
         started, release, finished = threading.Event(), threading.Event(), threading.Event()
         processed = []

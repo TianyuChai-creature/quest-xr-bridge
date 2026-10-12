@@ -16,32 +16,90 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from quest_xr_bridge.coordinates import COORDINATE_PRESETS, remap_axes
-from quest_xr_bridge.pose import CoordinateTransformRequest, VideoPeerClose, WebRTCOffer, WebRTCVideoOffer
+from quest_xr_bridge.pose import (
+    CoordinateTransformRequest,
+    PosePeerClose,
+    VideoPeerClose,
+    WebRTCPoseOffer,
+    WebRTCVideoOffer,
+)
 from quest_xr_bridge.runtime import PoseRuntime, PoseSourceBusyError, PoseStreamProcessor
 from quest_xr_bridge.telemetry import format_status_line
 from quest_xr_bridge.video import VideoDisplayConfig, VideoManager, VideoUnavailableError
 
 logger = logging.getLogger(__name__)
 POSE_HANDSHAKE_TIMEOUT = 10
+POSE_SOURCE_RELEASE_TIMEOUT = 1
 _PACKAGED_STATIC = Path(__file__).parent / "static"
 STATIC_DIR = (
     _PACKAGED_STATIC if _PACKAGED_STATIC.is_dir() else Path(__file__).parent.parent / "static"
 )
 
 
-async def close_pose_peer(runtime: PoseRuntime, peer: RTCPeerConnection) -> None:
+def remember_pose_attempt(runtime: PoseRuntime, claim: PosePeerClose | WebRTCPoseOffer) -> None:
+    if claim.client_token is None:
+        return
+    token, attempt = claim.client_token, claim.attempt_id
+    runtime.pose_attempts[token] = max(runtime.pose_attempts.get(token, 0), attempt)
+    runtime.pose_attempts.move_to_end(token)
+    # shortcut: retain 64 page claims; increase if deployments need more retired pages.
+    if len(runtime.pose_attempts) > 64:
+        runtime.pose_attempts.popitem(last=False)
+
+
+async def retire_pose_peer(runtime: PoseRuntime, peer: RTCPeerConnection) -> asyncio.Task | None:
+    """Called under pose_lock; release ingress before background transport/log cleanup."""
+    if peer in runtime.peer_closures:
+        return runtime.peer_closures[peer]
+    if peer not in runtime.peers:
+        return None
+    processor = runtime.processors.get(peer)
+    if processor is not None:
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(processor.close), timeout=POSE_SOURCE_RELEASE_TIMEOUT
+            )
+        except TimeoutError as exc:
+            raise HTTPException(503, "pose source release timed out") from exc
+        runtime.processors.pop(peer, None)
     deadline = runtime.peer_timeouts.pop(peer, None)
     if deadline is not None and deadline is not asyncio.current_task():
         deadline.cancel()
-        await asyncio.gather(deadline, return_exceptions=True)
-    processor = runtime.processors.pop(peer, None)
-    runtime.peers.discard(peer)
-    if processor is not None:
-        processor.close()
-    if peer.connectionState != "closed":
-        await peer.close()
-    if processor is not None:
-        await asyncio.to_thread(processor.wait_closed)
+    if runtime.pose_peer is peer:
+        runtime.pose_peer = None
+    runtime.peer_claims.pop(peer, None)
+
+    async def finish() -> None:
+        try:
+            if peer.connectionState != "closed":
+                await peer.close()
+        finally:
+            if processor is not None:
+                await asyncio.to_thread(processor.wait_closed)
+
+    def finished(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error("Pose peer cleanup failed", exc_info=error)
+            return
+        runtime.peers.discard(peer)
+        runtime.peer_closures.pop(peer, None)
+
+    cleanup = asyncio.create_task(finish())
+    runtime.peer_closures[peer] = cleanup
+    cleanup.add_done_callback(finished)
+    return cleanup
+
+
+async def close_pose_peer(
+    runtime: PoseRuntime, peer: RTCPeerConnection, *, wait: bool = True
+) -> None:
+    async with runtime.pose_lock:
+        cleanup = await retire_pose_peer(runtime, peer)
+    if wait and cleanup is not None:
+        await asyncio.shield(cleanup)
 
 
 async def _report_status(runtime: PoseRuntime) -> None:
@@ -135,16 +193,32 @@ def create_app(runtime: PoseRuntime, video: VideoManager) -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
 
     @app.post("/api/webrtc/offer")
-    async def pose_offer(offer: WebRTCOffer, request: Request) -> dict[str, str]:
-        if runtime.active_source.describe()["active"] or runtime.peers:
-            raise HTTPException(409, "another Quest is already connected")
-        peer = RTCPeerConnection(RTCConfiguration(iceServers=[]))
-        runtime.peers.add(peer)
+    async def pose_offer(offer: WebRTCPoseOffer, request: Request) -> dict[str, str]:
+        async with runtime.pose_lock:
+            current = runtime.pose_peer
+            token, attempt = runtime.peer_claims.get(current, (None, None))
+            if offer.client_token is not None:
+                latest = runtime.pose_attempts.get(offer.client_token, 0)
+                if token == offer.client_token:
+                    latest = max(latest, attempt)
+                if offer.attempt_id <= latest:
+                    raise HTTPException(409, "pose attempt is stale or cancelled")
+            if current is not None:
+                if offer.client_token is None or offer.client_token != token:
+                    raise HTTPException(409, "pose source is occupied by another page")
+                await retire_pose_peer(runtime, current)
+            if runtime.active_source.describe()["active"]:
+                raise HTTPException(409, "pose source is occupied by another page")
+            peer = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+            runtime.peers.add(peer)
+            runtime.pose_peer = peer
+            runtime.peer_claims[peer] = offer.client_token, offer.attempt_id
+            remember_pose_attempt(runtime, offer)
 
         async def expire_handshake() -> None:
             await asyncio.sleep(POSE_HANDSHAKE_TIMEOUT)
             if peer in runtime.peers and peer not in runtime.processors:
-                await close_pose_peer(runtime, peer)
+                await close_pose_peer(runtime, peer, wait=False)
 
         runtime.peer_timeouts[peer] = asyncio.create_task(expire_handshake())
         client = request.client
@@ -153,13 +227,13 @@ def create_app(runtime: PoseRuntime, video: VideoManager) -> FastAPI:
         @peer.on("datachannel")
         def on_datachannel(channel: Any) -> None:
             if (
-                peer not in runtime.peers
+                runtime.pose_peer is not peer
                 or channel.label != "pose"
                 or channel.ordered
                 or channel.maxPacketLifeTime != 30
             ):
                 channel.close()
-                asyncio.create_task(close_pose_peer(runtime, peer))
+                asyncio.create_task(close_pose_peer(runtime, peer, wait=False))
                 return
             if peer in runtime.processors:
                 channel.close()
@@ -168,7 +242,7 @@ def create_app(runtime: PoseRuntime, video: VideoManager) -> FastAPI:
                 processor = PoseStreamProcessor(runtime, client_name)
             except PoseSourceBusyError:
                 channel.close()
-                asyncio.create_task(close_pose_peer(runtime, peer))
+                asyncio.create_task(close_pose_peer(runtime, peer, wait=False))
                 return
             runtime.processors[peer] = processor
             deadline = runtime.peer_timeouts.pop(peer, None)
@@ -181,12 +255,12 @@ def create_app(runtime: PoseRuntime, video: VideoManager) -> FastAPI:
 
             @channel.on("close")
             def on_close() -> None:
-                asyncio.create_task(close_pose_peer(runtime, peer))
+                asyncio.create_task(close_pose_peer(runtime, peer, wait=False))
 
         @peer.on("connectionstatechange")
         async def state_changed() -> None:
             if peer.connectionState in {"failed", "disconnected", "closed"}:
-                await close_pose_peer(runtime, peer)
+                await close_pose_peer(runtime, peer, wait=False)
 
         try:
             async with asyncio.timeout(10):
@@ -194,12 +268,30 @@ def create_app(runtime: PoseRuntime, video: VideoManager) -> FastAPI:
                 await peer.setLocalDescription(await peer.createAnswer())
             if peer.localDescription is None:
                 raise ValueError("WebRTC answer not created")
+            async with runtime.pose_lock:
+                if runtime.pose_peer is not peer:
+                    raise HTTPException(409, "pose attempt was superseded")
             return {"sdp": peer.localDescription.sdp, "type": peer.localDescription.type}
+        except HTTPException:
+            await close_pose_peer(runtime, peer, wait=False)
+            raise
         except (Exception, asyncio.CancelledError) as exc:
-            await close_pose_peer(runtime, peer)
+            await close_pose_peer(runtime, peer, wait=False)
             if isinstance(exc, asyncio.CancelledError):
                 raise
             raise HTTPException(400, f"pose negotiation failed: {exc}") from exc
+
+    @app.post("/api/webrtc/close")
+    async def pose_close(claim: PosePeerClose) -> dict[str, bool]:
+        async with runtime.pose_lock:
+            remember_pose_attempt(runtime, claim)
+            peer = runtime.pose_peer
+            closed = peer is not None and runtime.peer_claims[peer] == (
+                claim.client_token, claim.attempt_id
+            )
+            if closed:
+                await retire_pose_peer(runtime, peer)
+            return {"closed": closed}
 
     @app.websocket("/ws")
     async def output(websocket: WebSocket) -> None:

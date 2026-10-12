@@ -8,6 +8,22 @@
 - 同一 HTTPS 入口与 XRSession；视频故障不关闭姿态或 XR。
 - 通用 `/ws` 输出、Viewer、坐标配置、可选录制；无相机品牌依赖。
 
+## Quest 主入口（先启动PC服务）
+
+> **在Quest浏览器打开：[https://192.168.8.122:8000/](https://192.168.8.122:8000/)**
+
+这是当前PC局域网地址下的日常主入口，可在Quest中收藏。
+
+1. 先启动PC上的Quest XR Bridge服务；需要相机画面时，同时启动宿主的相机采集和视频源。
+2. Quest与PC连接互通的局域网，在Quest浏览器打开上面的主入口，接受开发证书。
+3. 点击 **Start prep**，三秒准备结束后发送姿态；网络复测期间保持同一页面与XRSession。
+   服务更新后重新打开页面，加载最新源码。
+
+**PC侧查看姿态：[https://192.168.8.122:8000/viewer](https://192.168.8.122:8000/viewer)**。
+
+`192.168.8.122` 是2026-10-12复测使用的PC地址。换网络或IP后，以服务启动时输出的URL
+（SDK的 `service.url`）为准；主入口路径固定为 `/`。服务停止时，这个入口不可访问。
+
 ## 安装与启动
 
 基础功能需要 Python 3.13+。从 [v0.3.0 Release](https://github.com/TianyuChai-creature/quest-xr-bridge/releases/tag/v0.3.0)
@@ -18,9 +34,14 @@ python -m pip install quest_xr_bridge-0.3.0-py3-none-any.whl
 quest-xr-bridge
 ```
 
-Quest 打开 `https://<PC-IP>:8000/`；PC 查看 `https://<PC-IP>:8000/viewer`。
-接受开发证书后点击 **Start prep**，三秒准备结束开始发送姿态。
+服务启动后按上面的 **Quest主入口** 在头显中访问；部署到其他PC时使用该服务输出的URL。
 需支持并允许 WebXR 手部及身体追踪的 Quest Browser。
+
+当前源码支持同一已打开页面凭据接管旧姿态连接，处理断网恢复时旧活动源迟迟未释放的问题。
+消费JSON新增 `ingress_connection_id`，参考门控在来源连接变化时锁定许可；
+QCRT仍为v5/804字节。补丁已完成一轮头显断网复测：姿态在Wi-Fi连通后约2.94秒恢复，
+视频在成功API配置回调后约3.30秒恢复；视频状态回报距Wi-Fi连通约6.57秒。
+重复、弱网和长时场景仍**未验收**，见[连接契约](docs/USAGE.md#姿态连接接管当前源码)。
 
 嵌入宿主程序，无需另外维护服务终端：
 

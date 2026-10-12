@@ -406,6 +406,9 @@
       let xrEntering = false
       let pageLeaving = false
       let poseOfferAbort = null
+      const poseClientToken = crypto.randomUUID()
+      let poseAttemptId = 0
+      let poseClaim = null
       let sent = 0
       let dropped = 0
       let seq = 0
@@ -471,6 +474,13 @@
         poseSendBlockedAt = null
         const channel = dataChannel
         const peer = peerConnection
+        const claim = poseClaim
+        poseClaim = null
+        if (claim) fetch("/api/webrtc/close", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(claim), keepalive: true,
+          signal: AbortSignal.timeout(2000),
+        }).catch(() => {})
         poseOfferAbort?.abort()
         poseOfferAbort = null
         dataChannel = null
@@ -510,6 +520,8 @@
       }
 
       async function connectWebRTC(attempt) {
+        const claim = { client_token: poseClientToken, attempt_id: ++poseAttemptId }
+        poseClaim = claim
         const peer = new RTCPeerConnection({ iceServers: [] })
         const channel = peer.createDataChannel("pose", {
           ordered: false,
@@ -541,6 +553,7 @@
           body: JSON.stringify({
             sdp: peer.localDescription.sdp,
             type: peer.localDescription.type,
+            ...claim,
           }),
         })
         if (!response.ok) throw await offerError(response, "Pose offer rejected")

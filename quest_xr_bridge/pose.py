@@ -131,6 +131,34 @@ class WebRTCVideoOffer(WebRTCOffer):
         return VideoPeerClose.bounded_peer_id(value)
 
 
+class WebRTCPoseOffer(WebRTCOffer):
+    client_token: UUID | None = None
+    attempt_id: int | None = Field(default=None, strict=True, ge=1, le=2**53 - 1)
+
+    @field_validator("client_token", mode="before")
+    @classmethod
+    def bounded_client_token(cls, value):
+        return None if value is None else VideoPeerClose.bounded_peer_id(value)
+
+    @model_validator(mode="after")
+    def paired_claim(self) -> WebRTCPoseOffer:
+        if (self.client_token is None) != (self.attempt_id is None):
+            raise ValueError("client_token and attempt_id must be provided together")
+        return self
+
+
+class PosePeerClose(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    client_token: UUID
+    attempt_id: int = Field(strict=True, ge=1, le=2**53 - 1)
+
+    @field_validator("client_token", mode="before")
+    @classmethod
+    def bounded_client_token(cls, value):
+        return VideoPeerClose.bounded_peer_id(value)
+
+
 class CoordinateTransformRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

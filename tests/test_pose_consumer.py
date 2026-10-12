@@ -89,6 +89,26 @@ class PoseConsumerTests(unittest.TestCase):
         self.assert_stopped(0.02)
         self.assertTrue(self.gate.confirm("left", 0.02))
 
+    def test_connection_change_latches_even_below_timeout_with_same_session(self):
+        first = {**frame(10), "ingress_connection_id": SESSION}
+        self.assertTrue(self.gate.receive(first, 0))
+        self.assertTrue(self.gate.confirm("left", 0))
+        self.assertTrue(self.gate.receive({**first, "seq": 11}, 0.01))
+        self.assertTrue(self.gate.allowed(0.01)["left"])
+        second = {**frame(12), "ingress_connection_id": OTHER_SESSION}
+        self.assertTrue(self.gate.receive(second, 0.02))
+        self.assert_stopped(0.02)
+        self.assertTrue(self.gate.confirm("left", 0.02))
+        self.assertTrue(self.gate.receive(frame(13), 0.03))
+        self.assert_stopped(0.03)  # Losing the source marker also revokes permission.
+
+    def test_invalid_connection_id_never_refreshes_receipt_or_permission(self):
+        for value in (None, "invalid", 1):
+            self.gate.source_changed()
+            self.arm()
+            self.assertFalse(self.gate.receive({**frame(2), "ingress_connection_id": value}, 0.01))
+            self.assert_stopped(0.01)
+
     def test_system_fault_cannot_be_cleared_by_new_poses_or_confirmation(self):
         self.arm()
         self.gate.set_inhibited(True)

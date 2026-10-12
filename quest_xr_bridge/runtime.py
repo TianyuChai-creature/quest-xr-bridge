@@ -7,10 +7,11 @@ import json
 import logging
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import UUID, uuid4
 
 from quest_xr_bridge.binary_protocol import PACKET_SIZE, decode_pose_packet
 from quest_xr_bridge.coordinates import (
@@ -205,6 +206,11 @@ class PoseRuntime:
         self.peers: set[Any] = set()
         self.peer_timeouts: dict[Any, asyncio.Task[None]] = {}
         self.processors: dict[Any, PoseStreamProcessor] = {}
+        self.pose_lock = asyncio.Lock()
+        self.pose_peer: Any | None = None
+        self.peer_claims: dict[Any, tuple[UUID | None, int | None]] = {}
+        self.pose_attempts: OrderedDict[UUID, int] = OrderedDict()
+        self.peer_closures: dict[Any, asyncio.Task[None]] = {}
         self._output_lock = threading.Lock()
         self._output_key: tuple[int, int] | None = None
         self._output_text: str | None = None
@@ -244,6 +250,7 @@ class PoseStreamProcessor:
 
     def __init__(self, runtime: PoseRuntime, client_name: str) -> None:
         self.runtime, self._client_name = runtime, client_name
+        self.connection_id = str(uuid4())
         if not runtime.active_source.acquire(self, client_name):
             raise PoseSourceBusyError("another Quest is already active")
         self._condition = threading.Condition()
@@ -309,13 +316,10 @@ class PoseStreamProcessor:
                     self._pending = None
                 self._process(message, epoch_ms, monotonic_ms)
         finally:
+            self.close()
             if self._pose_log is not None:
                 self._pose_log.close()
                 self._pose_log.wait_closed()
-            # Clear old state before allowing a replacement source to publish.
-            self.runtime.latest_pose.publish(None)
-            self.runtime.ingress.clear()
-            self.runtime.active_source.release(self)
 
     def _process(self, message: bytes, epoch_ms: float, monotonic_ms: float) -> None:
         try:
@@ -345,6 +349,7 @@ class PoseStreamProcessor:
         frame.update(
             {
                 "ingress_transport": "webrtc",
+                "ingress_connection_id": self.connection_id,
                 "server_received_epoch_ms": epoch_ms,
                 "server_received_monotonic_ms": monotonic_ms,
                 "estimated_transport_latency_ms": delta,
@@ -357,24 +362,30 @@ class PoseStreamProcessor:
             if self._pose_log is not None:
                 self._pose_log.submit(frame)
             self.runtime.latest_pose.publish(frame)
-        now = time.monotonic()
-        elapsed = now - self._interval_started
-        self.runtime.ingress.record(
-            fps=self._interval_received / elapsed if elapsed > 0 else 0,
-            seq=seq,
-            transport="webrtc",
-            ingress_drop=self._ingress_dropped,
-            log_drop=self._pose_log.dropped if self._pose_log else 0,
-            effective_loss_pct=100 * self._missing / (self._received + self._missing),
-        )
-        if elapsed >= 1:
-            self._interval_started, self._interval_received = now, 0
+            now = time.monotonic()
+            elapsed = now - self._interval_started
+            self.runtime.ingress.record(
+                fps=self._interval_received / elapsed if elapsed > 0 else 0,
+                seq=seq,
+                transport="webrtc",
+                ingress_drop=self._ingress_dropped,
+                log_drop=self._pose_log.dropped if self._pose_log else 0,
+                effective_loss_pct=100 * self._missing / (self._received + self._missing),
+            )
+            if elapsed >= 1:
+                self._interval_started, self._interval_received = now, 0
 
     def close(self) -> None:
         with self._condition:
+            if self._closed:
+                return
             self._closed = True
             self._pending = None
             self._condition.notify()
+            # Fence every shared-state write before admitting a replacement source.
+            self.runtime.latest_pose.publish(None)
+            self.runtime.ingress.clear()
+            self.runtime.active_source.release(self)
 
     def wait_closed(self, timeout: float | None = None) -> None:
         self._worker.join(timeout)
