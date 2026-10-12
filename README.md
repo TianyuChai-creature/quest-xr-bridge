@@ -77,6 +77,7 @@ with QuestServer() as service:
 - [相对 main 的改造说明](docs/reference/REFACTOR.md)：基线124ae02、决策及兼容性变化。
 - [冻结与验收结论](docs/reference/ACCEPTANCE.md)：实测范围、冻结参数及未完成项。
 - [通用双目示例](examples/frozen_stereo.py)：与相机品牌无关的参考预处理。
+- [姿态消费许可契约](docs/USAGE.md#消费许可契约暂行)：每手授权、暂行50ms告警/100ms保持、故障锁定和用户确认；[参考门控](examples/pose_consumer.py)。
 
 ## 开发检查
 

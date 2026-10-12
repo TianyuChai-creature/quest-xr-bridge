@@ -7,7 +7,7 @@ const flush = () => new Promise(setImmediate)
 function environment({prepareFails = false, drawFails = false, contextLost = false,
                       initFails = false, calibrated = true, h264 = true,
                       offerDetail = null, deferredOffer = false, codecs = null, projection = "camera"} = {}) {
-  let now = 0, sequence = 0, callbackId = 0, resolveOffer
+  let now = 0, sequence = 0, callbackId = 0, resolveOffer, configFails = false
   let snapshot = {enabled: true, running: true, frame_age_ms: 0, stream_generation: 1,
     config: {width: 1280, height: 720, fps: 60, mode: "stereo",
       left_intrinsics: calibrated ? {fx: 727, fy: 728, cx: 627, cy: 361} : null,
@@ -64,6 +64,7 @@ function environment({prepareFails = false, drawFails = false, contextLost = fal
         if (offerDetail) return {ok: false, status: 400, json: async () => ({detail: offerDetail})}
         return {ok: true, json: async () => ({type: "answer", sdp: "answer"})}
       }
+      if (configFails) throw new Error("Camera status request timed out")
       if (options.method === "PUT") snapshot = {...snapshot, display: JSON.parse(options.body)}
       return {ok: true, json: async () => structuredClone(snapshot)}
     },
@@ -73,6 +74,7 @@ function environment({prepareFails = false, drawFails = false, contextLost = fal
   const receiver = new context.VideoReturn()
   return {receiver, video, peers, requests, renderers, prepared, drawn, session, viewerPose, frame, glLayer, gl,
     get snapshot() {return structuredClone(snapshot)}, setSnapshot(value) {snapshot = value},
+    failConfig(value) {configFails = value},
     time(value) {now = value}, resolveOffer: () => resolveOffer(), offerError: context.offerError,
     track(peer = peers.at(-1)) {
       const track = {kind: "video", addEventListener() {}, stop() {this.stopped = true}}
@@ -110,6 +112,9 @@ async function check() {
   assert.equal(env.drawn.length, 2)
   env.time(261); receiver.beginFrame(env.frame, env.viewerPose); receiver.renderView({eye: "left"}, {})
   assert.equal(env.drawn.length, 2, "250 ms without a decoded frame hides the previous image")
+  receiver.tick()
+  assert.equal(receiver.status, "Camera stale")
+  assert.equal(receiver.frameReady, false)
   assert.equal(peer.closed, undefined)
   env.time(270); env.decoded()
   const changed = env.snapshot
@@ -158,6 +163,28 @@ async function check() {
   assert.equal(retry.peers[1].closed, true)
   assert.equal(retry.peers.length, 3)
   retry.receiver.close()
+
+  const statusFailure = environment()
+  await flush(); statusFailure.start(); await flush(); statusFailure.track(); statusFailure.decoded()
+  statusFailure.receiver.tick()
+  assert.equal(statusFailure.receiver.status, "Stereo camera live")
+  statusFailure.failConfig(true)
+  await statusFailure.receiver.refresh()
+  statusFailure.receiver.tick()
+  assert.equal(statusFailure.receiver.status, "Camera status request timed out", "XR ticks preserve status timeouts")
+  assert.equal(statusFailure.receiver.frameReady, false)
+  assert.equal(statusFailure.session.ended, false)
+  statusFailure.failConfig(false)
+  await statusFailure.receiver.refresh(); await flush(); statusFailure.track(); statusFailure.decoded()
+  statusFailure.receiver.tick()
+  assert.equal(statusFailure.receiver.status, "Stereo camera live", "a successful refresh clears the timeout warning")
+  const staleSource = statusFailure.snapshot
+  staleSource.frame_age_ms = 251
+  statusFailure.receiver.acceptSnapshot(staleSource)
+  statusFailure.receiver.beginFrame(statusFailure.frame, statusFailure.viewerPose)
+  assert.equal(statusFailure.receiver.frameReady, false, "fresh decode cannot override stale source metadata")
+  assert.equal(statusFailure.receiver.status, "Camera stale")
+  statusFailure.receiver.close()
 
   for (const flags of [{prepareFails: true}, {drawFails: true}, {contextLost: true}]) {
     const failed = environment(flags)

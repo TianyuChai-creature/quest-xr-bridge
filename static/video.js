@@ -104,7 +104,8 @@ export class VideoReturn {
       if (!this.closed && revision === this.revision) {
         this.snapshot = null
         this.disconnect()
-        this.setStatus(error.message)
+        this.configError = error.message
+        this.setStatus(this.configError)
       }
     } finally {
       this.polling = false
@@ -128,6 +129,7 @@ export class VideoReturn {
   }
 
   acceptSnapshot(snapshot) {
+    this.configError = null
     const config = snapshot.config
     const key = config ? JSON.stringify([
       snapshot.stream_generation, config.width, config.height, config.mode, config.fps,
@@ -242,7 +244,7 @@ export class VideoReturn {
         !hasGeometry(this.snapshot) || !fresh) {
       if (!this.enabled) this.setStatus("Camera off")
       else if (this.capabilityError) this.setStatus(this.capabilityError)
-      else if (!sourceReady) this.setStatus(this.snapshot?.error || "Waiting for SDK camera")
+      else if (!sourceReady) this.setStatus(this.configError || this.snapshot?.error || "Waiting for SDK camera")
       else if (!hasGeometry(this.snapshot)) this.setStatus("Camera projection needs calibrated per-eye intrinsics")
       else if (!this.session) this.setStatus("Camera ready for XR")
       else this.setStatus(this.connectionError || (this.lastFrameAt === null ? "Waiting for camera frames" : "Camera stale"))

@@ -30,3 +30,4 @@ packages = ["quest_xr_bridge"]
 "patches/gstreamer-webrtc-dtls-owner.patch" = "quest_xr_bridge/patches/gstreamer-webrtc-dtls-owner.patch"
 "examples/__init__.py" = "quest_xr_bridge/examples/__init__.py"
 "examples/frozen_stereo.py" = "quest_xr_bridge/examples/frozen_stereo.py"
+"examples/pose_consumer.py" = "quest_xr_bridge/examples/pose_consumer.py"

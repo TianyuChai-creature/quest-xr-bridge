@@ -359,6 +359,9 @@
       const BINARY_PACKET_SIZE = 804
       const BODY_FRAME_EPSILON = 1e-6
       const RTC_PACKET_LIFETIME_MS = 30
+      // 暂行：本地发送告警50ms；PC控制接口可达后，恢复失败提示10s。
+      const POSE_SEND_WARNING_MS = 50
+      const RECOVERY_FAILURE_MS = 10000
       /** Scheme A: single click → XR → countdown (no pose) → auto stream. No second click. */
       const PREP_COUNTDOWN_S = 3
       const PREP_HINT =
@@ -377,6 +380,11 @@
       const videoReturn = new VideoReturn({
         onStatus(status) { document.querySelector("#video-status").textContent = status },
         onConfig(snapshot) {
+          if (xrSession) {
+            const now = performance.now()
+            if (!transportIsOpen()) poseRecoveryStartedAt ??= now
+            if (videoReturn.enabled && !videoReturn.frameReady) videoRecoveryStartedAt ??= now
+          }
           if (videoSettings.contains(document.activeElement)) return
           const display = snapshot.display
           for (const name of ["saturation", "gamma", "height_m", "distance_m", "offset_x_m", "offset_y_m"]) {
@@ -406,9 +414,36 @@
       let sessionPhase = "idle"
       let prepDeadlineMs = 0
       let poseStreaming = false
+      let poseSendBlockedAt = null
+      let poseRecoveryStartedAt = null
+      let videoRecoveryStartedAt = null
 
       function transportIsOpen() {
         return dataChannel?.readyState === "open"
+      }
+
+      function makeXRHud(inPrep, countdownSec, bodyCoordinateFrame, nowMs) {
+        const hints = []
+        if (!transportIsOpen()) {
+          hints.push(`Pose disconnected: ${transportStatus.textContent}`)
+          if (poseRecoveryStartedAt !== null && nowMs - poseRecoveryStartedAt >= RECOVERY_FAILURE_MS) {
+            hints.push("Pose recovery failed (10s)")
+          }
+        } else {
+          poseRecoveryStartedAt = null
+          if (poseSendBlockedAt !== null && nowMs - poseSendBlockedAt >= POSE_SEND_WARNING_MS) {
+            hints.push("Pose send stalled (50ms)")
+          }
+        }
+        if (videoReturn.enabled && !videoReturn.frameReady) {
+          hints.push(videoReturn.status || "Waiting for camera frames")
+          if (videoRecoveryStartedAt !== null && nowMs - videoRecoveryStartedAt >= RECOVERY_FAILURE_MS) {
+            hints.push("Camera recovery failed (10s)")
+          }
+        } else videoRecoveryStartedAt = null
+        if (!bodyCoordinateFrame) hints.push("Body tracking unavailable\nKeep your upper body in view")
+        if (inPrep) hints.push(PREP_HINT)
+        return { show: hints.length > 0, countdown: countdownSec, hint: hints.join("\n") }
       }
 
       function setSessionPhase(phase) {
@@ -433,6 +468,7 @@
 
       function closeCurrentTransport() {
         connectionAttempt += 1
+        poseSendBlockedAt = null
         const channel = dataChannel
         const peer = peerConnection
         poseOfferAbort?.abort()
@@ -983,16 +1019,31 @@
           hudCtx.stroke()
           // big number
           hudCtx.fillStyle = "#fde68a"
-          hudCtx.font = "bold 280px ui-sans-serif, system-ui, sans-serif"
+          hudCtx.font = "bold 160px ui-sans-serif, system-ui, sans-serif"
           hudCtx.textAlign = "center"
           hudCtx.textBaseline = "middle"
-          if (countdownSec > 0) hudCtx.fillText(String(countdownSec), w / 2, h * 0.42)
+          if (countdownSec > 0) hudCtx.fillText(String(countdownSec), w / 2, h * 0.25)
           // hint
           hudCtx.fillStyle = "#e4e4e7"
           hudCtx.font = "600 42px ui-sans-serif, system-ui, sans-serif"
-          const lines = hintLines.split("\n")
+          const lines = []
+          for (const paragraph of hintLines.split("\n")) {
+            let line = ""
+            for (const word of paragraph.split(/\s+/)) {
+              const next = line ? `${line} ${word}` : word
+              if (line && hudCtx.measureText(next).width > w - 144) {
+                lines.push(line)
+                line = word
+              } else line = next
+            }
+            lines.push(line)
+          }
+          const top = countdownSec > 0 ? 220 : 80
+          const lineHeight = Math.min(52, (h - 80 - top) / lines.length)
+          hudCtx.font = `600 ${Math.min(42, lineHeight * 0.85)}px ui-sans-serif, system-ui, sans-serif`
+          const firstY = top + (h - 80 - top - (lines.length - 1) * lineHeight) / 2
           lines.forEach((line, i) => {
-            hudCtx.fillText(line, w / 2, h * 0.72 + i * 52)
+            hudCtx.fillText(line, w / 2, firstY + i * lineHeight, w - 144)
           })
           gl.bindTexture(gl.TEXTURE_2D, hudTexture)
           gl.texImage2D(
@@ -1168,7 +1219,9 @@
         if (xrSession !== session) return
         xrSession = null
         poseStreaming = false
+        poseSendBlockedAt = null
         prepDeadlineMs = 0
+        poseRecoveryStartedAt = videoRecoveryStartedAt = null
         videoReturn.setSession(null)
         xrRenderer?.dispose()
         xrRenderer = null
@@ -1310,6 +1363,9 @@
             const countdownSec = inPrep
               ? Math.max(1, Math.ceil(remainingMs / 1000))
               : 0
+            const rtc = transportIsOpen() ? dataChannel : null
+            if (poseStreaming && rtc?.bufferedAmount > 0) poseSendBlockedAt ??= nowMs
+            else poseSendBlockedAt = null
 
             renderer.render(
               frame,
@@ -1320,9 +1376,7 @@
               rightElbow,
               leftShoulder,
               rightShoulder,
-              inPrep
-                ? { show: true, countdown: countdownSec, hint: PREP_HINT }
-                : { show: !bodyCoordinateFrame, countdown: 0, hint: "Body tracking unavailable\nKeep your upper body in view" }
+              makeXRHud(inPrep, countdownSec, bodyCoordinateFrame, nowMs)
             )
 
             // Do not send poses until countdown finished (hands free to pose)
@@ -1336,7 +1390,6 @@
               return
             }
 
-            const rtc = dataChannel?.readyState === "open" ? dataChannel : null
             if (!rtc) return
             if (!bodyCoordinateFrame) {
               xrStatus.textContent = "Body tracking unavailable"

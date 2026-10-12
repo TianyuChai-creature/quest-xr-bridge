@@ -35,8 +35,10 @@ async function checkPose() {
     window: { addEventListener(name, handler) { events[name] = handler } },
     location: { reload() {} },
     VideoReturn: class {
-      constructor() { videoInstances.push(this) }
-      setEnabled() {} tick() {}
+      constructor({ onStatus, onConfig }) { this.onStatus = onStatus; this.onConfig = onConfig; this.enabled = false; videoInstances.push(this) }
+      setEnabled(enabled) { this.enabled = enabled }
+      setStatus(status) { this.status = status; this.onStatus(status) }
+      tick() {}
       beginFrame(frame) { this.frame = frame; drawOrder.push("video prepare") }
       renderView() { drawOrder.push("video") }
       setSession(session, layer, space, context) { this.session = session; this.gl = context }
@@ -89,6 +91,16 @@ async function checkPose() {
       orientation: { x: 0, y: 0, z: 0, w: 1 } } } },
     getViewerPose() { return { transform: { orientation: { x: 0, y: 0, z: 0, w: 1 } } } },
   }
+  vm.runInContext('videoReturn.setEnabled(true); videoReturn.setStatus("Camera stale"); dataChannel.readyState = "closed"; setConnectionStatus("WebRTC: channel timeout")', context)
+  now = 1000; session.frame(now, { ...frame, body: undefined })
+  assert.equal(rendered.at(-1).countdown, 2)
+  for (const message of ["Camera stale", "Pose disconnected", "channel timeout", "Body tracking unavailable", "Hold a pose"]) {
+    assert(rendered.at(-1).hint.includes(message), "faults remain visible together during preparation: " + message)
+  }
+  assert.equal(elements.get("#video-status").textContent, "Camera stale")
+  assert.equal(packets.length, 0)
+  vm.runInContext('videoReturn.setEnabled(false); dataChannel.readyState = "open"; setConnectionStatus("WebRTC open")', context)
+  drawOrder.length = 0
   now = 2999; session.frame(now, frame)
   assert.equal(videoInstances[0].gl, gl, "video shares the existing XR WebGL context")
   assert.equal(videoInstances[0].frame, frame)
@@ -108,6 +120,52 @@ async function checkPose() {
   assert(rendered.at(-1).hint.includes("Body tracking unavailable"))
   now = 3200; session.frame(now, frame)
   assert.equal(packets.length, 2)
+  const video = videoInstances[0]
+  video.setEnabled(true); video.frameReady = false; video.setStatus("Camera stale")
+  now = 3250; session.frame(now, frame)
+  assert(rendered.at(-1).hint.includes("Camera stale"))
+  assert.equal(packets.length, 3, "a video fault still sends fresh pose data")
+  assert.equal(posePeer.closed, undefined)
+  video.frameReady = true; video.setStatus("Stereo camera live")
+  now = 3260; session.frame(now, frame)
+  assert.equal(rendered.at(-1).show, false, "fresh video clears its warning")
+  video.setEnabled(false); video.frameReady = false
+  now = 3270; session.frame(now, frame)
+  assert.equal(rendered.at(-1).show, false, "deliberately disabled video does not warn")
+  const beforeStall = packets.length
+  poseChannel.bufferedAmount = 804
+  now = 3300; session.frame(now, frame)
+  now = 3349; session.frame(now, frame)
+  assert.equal(rendered.at(-1).show, false)
+  now = 3350; session.frame(now, frame)
+  assert(rendered.at(-1).hint.includes("Pose send stalled"), "local backpressure warns at the provisional 50ms threshold")
+  now = 3551; session.frame(now, frame)
+  assert(rendered.at(-1).hint.includes("Pose send stalled"))
+  assert.equal(packets.length, beforeStall, "backpressure still drops rather than queues old poses")
+  poseChannel.bufferedAmount = 0
+  now = 3552; session.frame(now, frame)
+  assert.equal(rendered.at(-1).show, false)
+  assert.equal(packets.length, beforeStall + 1)
+  poseChannel.readyState = "closed"
+  vm.runInContext('setConnectionStatus("WebRTC connecting")', context)
+  now = 3600; session.frame(now, frame)
+  assert(rendered.at(-1).hint.includes("Pose disconnected"))
+  assert.equal(packets.length, beforeStall + 1)
+  poseChannel.readyState = "open"
+  now = 3610; session.frame(now, frame)
+  assert.equal(rendered.at(-1).show, false)
+  video.setEnabled(true); video.setStatus("Waiting for camera frames")
+  poseChannel.readyState = "closed"
+  vm.runInContext('videoSettings.contains = () => true', context)
+  video.onConfig({})  // A successful PC control response starts recovery timing even while editing settings.
+  now = 13609; session.frame(now, frame)
+  assert(!rendered.at(-1).hint.includes("recovery failed"))
+  now = 13610; session.frame(now, frame)
+  assert(rendered.at(-1).hint.includes("Camera recovery failed (10s)"))
+  assert(rendered.at(-1).hint.includes("Pose recovery failed (10s)"))
+  poseChannel.readyState = "open"; video.frameReady = true
+  now = 13611; session.frame(now, frame)
+  assert.equal(rendered.at(-1).show, false)
   await session.end()
   assert.equal(videoInstances[0].session, null)
   assert.equal(disposeCount, 1)
@@ -192,8 +250,25 @@ function checkCameraAndGuidesDrawOrder() {
   assert.deepEqual(hudAnchors, [headMatrix, headMatrix], "both eyes project the same head-anchored HUD geometry")
 }
 
+function checkHudTextLayout() {
+  const html = fs.readFileSync(path.join(__dirname, "../static/index.html"), "utf8")
+  const source = html.slice(html.indexOf("function paintHud("), html.indexOf("function roundRect("))
+  const text = [], hudCtx = { clearRect() {}, fill() {}, stroke() {},
+    measureText: value => ({ width: value.length * 23 }),
+    fillText(value, x, y, width) { text.push({ value, x, y, width }) },
+  }
+  const scope = { hudCanvas: { width: 1024, height: 512 }, hudCtx, hudTexture: {}, roundRect() {},
+    gl: { bindTexture() {}, texImage2D() {} } }
+  vm.runInNewContext(source + '\npaintHud(2, "Pose disconnected: WebRTC channel timeout\\nCamera video unavailable: decoded frame updates unsupported\\nBody tracking unavailable\\nKeep your upper body in view\\nHold a pose close to the robot arms\\nDo not tap the UI")', scope)
+  assert.equal(text[0].value, "2")
+  assert(text.length > 6, "long warnings wrap")
+  for (const line of text) assert(line.y > 40 && line.y < 472, "all warning lines stay inside the HUD panel")
+  assert.equal(text.slice(1).map(line => line.value).join(" "), "Pose disconnected: WebRTC channel timeout Camera video unavailable: decoded frame updates unsupported Body tracking unavailable Keep your upper body in view Hold a pose close to the robot arms Do not tap the UI")
+}
+
 checkPose().then(() => {
   checkCameraAndGuidesDrawOrder()
+  checkHudTextLayout()
   checkViewer()
-  console.log("Pose preparation, body tracking, XR cleanup and viewer freshness checks passed")
+  console.log("XR fault HUD, pose isolation, preparation, cleanup and viewer freshness checks passed")
 }).catch(error => { console.error(error); process.exitCode = 1 })
