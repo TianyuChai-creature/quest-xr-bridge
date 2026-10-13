@@ -41,7 +41,12 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
             await client.close()
 
     async def test_live_old_peer_is_replaced_without_waiting_for_ice_failure(self):
-        from quest_xr_bridge.examples.pose_consumer import PoseConsumerGate
+        try:
+            from quest_xr_bridge.examples.pose_consumer import PoseConsumerGate
+        except ModuleNotFoundError as exc:
+            if exc.name != "quest_xr_bridge.examples":
+                raise
+            from examples.pose_consumer import PoseConsumerGate  # source tree force-include layout
 
         runtime = PoseRuntime()
         app = create_app(runtime, VideoManager())

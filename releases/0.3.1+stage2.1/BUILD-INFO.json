@@ -1,8 +1,9 @@
 {
   "version": "0.3.1+stage2.1",
-  "source_build_commit": "28c6fe3720f7fdf57b710b0ee05d1451704c6594",
+  "source_build_commit": "921e09bd8a65370660b283804dda26acb60fd771",
   "source_base_sha": "940b9ed831a538db8b6c15d1e172dc6a93ed782d",
-  "source_diff_sha256": "d085b81a6ad0beea2be5596eb1a6c3a2f24e31b67f82eecc6788b4b06baa647d",
+  "source_diff_sha256": "6c0d475fe37512c074e79b41293bea822371f90ef55f99f5f2eeaecccccedb78",
+  "source_diff_scope": "all source paths, excluding releases products",
   "source_tree_clean_at_build": true,
   "uncommitted": false,
   "wheel": "quest_xr_bridge-0.3.1+stage2.1-py3-none-any.whl",
