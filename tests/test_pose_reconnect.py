@@ -56,6 +56,7 @@ class PoseReconnectTests(unittest.IsolatedAsyncioTestCase):
         app = create_app(self.runtime, VideoManager())
         self.offer = next(r.endpoint for r in app.routes if r.path == "/api/webrtc/offer")
         self.close = next(r.endpoint for r in app.routes if r.path == "/api/webrtc/close")
+        self.exit = next(r.endpoint for r in app.routes if r.path == "/api/driving/exit")
         self.token = uuid4()
         self.fakes = []
         self.next_remote_gate = None
@@ -99,6 +100,27 @@ class PoseReconnectTests(unittest.IsolatedAsyncioTestCase):
         frame["seq"] = seq
         processor._process(encode_pose_packet(frame), 1, 1)
         return processor, channel
+
+    async def test_driving_grants_are_from_current_page_and_retired_peer_is_ignored(self):
+        await self.connect(1)
+        old_peer=self.runtime.pose_peer
+        _, old=self.publish(old_peer,1)
+        payload=dict(type="driving_event", event="enter", session_id=str(uuid4()),
+                     authorization_id=str(uuid4()), seq=1, reason="enter_click",
+                     server_epoch=self.runtime.driving.snapshot()["server_epoch"],
+                     client_token=str(self.token), attempt_id=1)
+        old.handlers["message"](json.dumps(payload))
+        self.assertTrue(self.runtime.driving.snapshot()["active"])
+        await self.connect(2)
+        _, new=self.publish(self.runtime.pose_peer,2)
+        payload["seq"]=2
+        payload["attempt_id"]=2
+        new.handlers["message"](json.dumps(payload))
+        payload.update(event="exit",reason="xr_end",seq=3)
+        old.handlers["message"](json.dumps(payload))
+        self.assertTrue(self.runtime.driving.snapshot()["active"])
+        new.handlers["message"](json.dumps(payload))
+        self.assertFalse(self.runtime.driving.snapshot()["active"])
 
     async def test_receiver_status_is_routed_without_counting_as_a_pose(self):
         await self.connect(1)
@@ -219,3 +241,30 @@ class PoseReconnectTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException):
             await self.connect(2)
         self.assertIs(self.runtime.pose_peer, current)
+
+    async def test_rtc_and_http_exit_before_enter_and_stale_claims(self):
+        await self.connect(1)
+        _, channel = self.publish(self.runtime.pose_peer, 1)
+        base = dict(type="driving_event", session_id=str(uuid4()), authorization_id=str(uuid4()),
+                    server_epoch=self.runtime.driving.snapshot()["server_epoch"],
+                    client_token=str(self.token), attempt_id=1)
+        request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+        for via_http in (False, True):
+            base['authorization_id'] = str(uuid4())
+            exit = dict(base, event="exit", reason="xr_end", seq=2)
+            if via_http:
+                self.assertEqual(await self.exit(exit, request), {"revoked": True})
+            else:
+                channel.handlers["message"](json.dumps(exit))
+            channel.handlers["message"](json.dumps(dict(base, event="enter", reason="enter_click", seq=1)))
+            self.assertFalse(self.runtime.driving.snapshot()["active"])
+            self.assertEqual(await self.exit(exit, request), {"revoked": False})
+        # An old HTTP page claim/epoch is rejected and cannot revoke a different grant.
+        await self.connect(2)
+        _, channel = self.publish(self.runtime.pose_peer, 2)
+        base.update(authorization_id=str(uuid4()), attempt_id=2)
+        channel.handlers["message"](json.dumps(dict(base, event="enter", reason="enter_click", seq=3)))
+        for patch in ({"attempt_id": 1}, {"client_token": str(uuid4())}, {"server_epoch": str(uuid4())}):
+            exit = dict(base, event="exit", reason="xr_end", seq=4); exit.update(patch)
+            self.assertEqual(await self.exit(exit, request), {"revoked": False})
+            self.assertTrue(self.runtime.driving.snapshot()["active"])

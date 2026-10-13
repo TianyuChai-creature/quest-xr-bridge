@@ -61,7 +61,7 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
                                 client_token=token, attempt_id=attempt),
                 SimpleNamespace(client=None),
             )
-            await client.setRemoteDescription(RTCSessionDescription(**answer))
+            await client.setRemoteDescription(RTCSessionDescription(sdp=answer["sdp"], type=answer["type"]))
             await asyncio.wait_for(opened.wait(), 3)
             return channel
 
@@ -160,7 +160,7 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
 
                 async def await_latest():
                     while not any(
-                        m["type"] == "websocket.send" and json.loads(m["text"])["seq"] == raw["seq"]
+                        m["type"] == "websocket.send" and json.loads(m["text"]).get("seq") == raw["seq"]
                         for m in sent[1]
                     ):
                         await asyncio.sleep(0.005)
