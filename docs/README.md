@@ -10,5 +10,5 @@
 - [冻结配置与验收范围](reference/ACCEPTANCE.md)
 - [量化数据](reference/measurements.json)
 
-本地发布产物按版本放在 `dist/v0.3.0/`，保留wheel、文档包和两者的SHA256校验清单。
+本地发布产物按版本放在 `dist/v0.3.1/`，保留wheel、文档包和两者的SHA256校验清单。
 已发布文档包保持原始内容；当前源文档以此目录为准。

@@ -1,4 +1,4 @@
-# Quest XR Bridge 0.3.0
+# Quest XR Bridge 0.3.1
 
 嵌入式 Quest 姿态与通用 RGB 视频 SDK。一个 `QuestServer` 对象管理 HTTPS 服务、
 姿态连接及可选视频进程；相机、机器人和云台由宿主程序控制。
@@ -26,11 +26,11 @@
 
 ## 安装与启动
 
-基础功能需要 Python 3.13+。从 [v0.3.0 Release](https://github.com/TianyuChai-creature/quest-xr-bridge/releases/tag/v0.3.0)
+基础功能需要 Python 3.13+。从 [v0.3.1 Release](https://github.com/TianyuChai-creature/quest-xr-bridge/releases/tag/v0.3.1)
 下载 wheel 后安装：
 
 ```bash
-python -m pip install quest_xr_bridge-0.3.0-py3-none-any.whl
+python -m pip install quest_xr_bridge-0.3.1-py3-none-any.whl
 quest-xr-bridge
 ```
 
@@ -42,6 +42,10 @@ quest-xr-bridge
 QCRT仍为v5/804字节。补丁已完成一轮头显断网复测：姿态在Wi-Fi连通后约2.94秒恢复，
 视频在成功API配置回调后约3.30秒恢复；视频状态回报距Wi-Fi连通约6.57秒。
 重复、弱网和长时场景仍**未验收**，见[连接契约](docs/USAGE.md#姿态连接接管当前源码)。
+
+0.3.1新增头显侧解码/双眼绘制有效性回传；宿主使用 `service.video_status()` 或
+`GET /api/video/status` 读取与当前姿态来源绑定的状态及超时原因。视频故障保持姿态链路独立，
+未收到状态或状态过期默认为无效。详见[状态接口](docs/API.md#questservervideo_status-receiver_timeout_s01---dict)。
 
 嵌入宿主程序，无需另外维护服务终端：
 
@@ -107,7 +111,7 @@ uv sync
 uv run python -m unittest discover -s tests -v
 node --test tests/*.cjs
 uv run python scripts/check_runtime_contracts.py --ca certs/cert.pem --inject
-uv build --wheel --out-dir dist/v0.3.0
+uv build --wheel --out-dir dist/v0.3.1
 ```
 
 `--inject` 需要已启动服务且没有实际 Quest 占用姿态连接；验证固定协议与通用输出。

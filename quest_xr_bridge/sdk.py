@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 from quest_xr_bridge.runtime import PoseRuntime
-from quest_xr_bridge.server import create_app
+from quest_xr_bridge.server import create_app, video_status
 from quest_xr_bridge.video import VideoConfig, VideoDisplayConfig, VideoManager
 
 logger = logging.getLogger(__name__)
@@ -281,6 +281,10 @@ class QuestServer:
 
     def set_video_display(self, config: VideoDisplayConfig) -> None:
         self._video.set_display(config)
+
+    def video_status(self, *, receiver_timeout_s: float = 0.1) -> dict:
+        """Snapshot receiver reports and sender state without starting video/hardware."""
+        return video_status(self._runtime, self._video, receiver_timeout_s=receiver_timeout_s)
 
     def stop_video(self, timeout: float = 10) -> None:
         self._video.stop(timeout=_timeout(timeout))

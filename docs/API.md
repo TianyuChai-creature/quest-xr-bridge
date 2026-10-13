@@ -1,6 +1,6 @@
-# Quest XR Bridge 0.3.0 Python SDK API
+# Quest XR Bridge 0.3.1 Python SDK API
 
-安装发行包 `quest-xr-bridge`，导入模块 `quest_xr_bridge`。本文对应0.3.0 wheel的公共接口。
+安装发行包 `quest-xr-bridge`，导入模块 `quest_xr_bridge`。本文对应0.3.1 wheel的公共接口。
 数据通过SDK的HTTPS/WSS/WebRTC服务消费；QuestServer没有隐含的相机驱动或机器人控制器。
 
 ## QuestServer
@@ -161,7 +161,50 @@ VideoDisplayConfig(swap_eyes=False, saturation=1, gamma=1,
 RuntimeError子类。表示视频运行环境/worker不可用；捕获后可以继续使用姿态功能。
 修复原生依赖或GPU问题后重新start_video，不需要重新创建整个QuestServer。
 HTTP状态及接收帧率通过 `/api/video/config`、`/health` 和接收端统计观察；
-SDK没有未文档化的public video_status属性或姿态回调。
+接收端软件状态通过下述 `video_status()` 方法读取；没有姿态回调。
+
+## QuestServer.video_status(*, receiver_timeout_s=0.1) -> dict
+
+返回独立快照，不启动相机、原生视频 worker 或设备。可从宿主线程读取。
+HTTP `GET /api/video/status`、`GET /api/video/config` 和 `/health` 的 `video`
+包含相同发送端信息及新增的 `receiver` 字段；HTTP 使用默认100ms超时。
+`receiver_timeout_s` 必须为有限正数，非法值抛ValueError。
+
+```python
+status = service.video_status()
+receiver = status["receiver"]
+# 宿主必须把来源身份与自己消费的姿态对应，再结合本地时钟和任务状态门控。
+video_valid = receiver["valid"]
+```
+
+| receiver字段 | 语义 |
+|---|---|
+| valid / reason | 服务端计算的有效性与原因；默认无报告为false |
+| session_id / ingress_connection_id | 当前XR session及服务端绑定的姿态入口；不是任意浏览器的状态 |
+| peer_id / stream_generation | 当前视频接收peer与视频源代次 |
+| status_seq / pose_seq | 独立递增状态序号及发送时的姿态序号 |
+| video_enabled / xr_active | 页面视频开关、XR会话处于visible状态 |
+| decoded_age_ms / rendered_age_ms | 页面报告的帧年龄加上控制服务器本地已等待时间；未观察到则null |
+| rendered_eyes | 该次报告观察到的双眼成功绘制；缺眼不能有效 |
+| report_age_ms / received_monotonic / timeout_ms | 服务端本地单调时钟收包年龄、收包时刻及超时阈值 |
+| status / evidence | 页面提示文案；证据类型固定为browser_decode_and_draw_report |
+
+状态复用当前姿态RTCDataChannel，使用有严格schema和4096字节上限的JSON
+`type=video_receiver_status`；QCRT仍为v5/804字节。先发送姿态，再附带最新状态，
+不积压状态或改变姿态发送优先级。正常XR绘制后约每50ms上报，断开/退出会撤销；
+状态丢失或XR回调停止时，服务端按本地100ms超时失效。
+这两个数值是待现场确认的工程默认值，不是实测PRD结论。
+
+只有当前姿态连接可以上报；旧peer/session/源代次、重复或倒序状态不续期。
+同页面姿态时间戳与报告时间戳偏差最多100ms，序号允许8帧以内异步处理偏差，
+避免把后台姿态处理线程尚未发布的新帧错误当作未知源。
+未收到报告、姿态来源已结束/变化、视频worker退出、视频关闭、XR不可见、
+解码或源帧超过250ms、绘制超过100ms或缺眼时，valid为false。
+
+`valid` 证明的是**浏览器报告的解码/双眼绘制路径**。它不证明物理面板正常、
+操作者真正看到了画面、镜头未遮挡，或画面内容不是黑色；这些仍需现场验收。
+宿主仍需监督自己收到状态的本地年龄，不能把缓存的true当作永久运动许可。
+SDK不自动授予机器人运动授权，也不规定操作者恢复交互。
 
 ## 通用单目示例
 
@@ -228,4 +271,4 @@ close和offer的源撤销/预留串行化，后台资源收尾不占用信令锁
 `WSS /ws` JSON附加 `ingress_connection_id`（服务端生成的UUID），每个姿态源连接不同，
 同源帧之间不变。它在下一有效新帧中反映来源切换，不是即时失效事件。
 消费者必须在编号变化时锁定许可，并继续执行收包超时与用户确认规则。
-QCRT输入布局保持v5/804字节。已冻结0.3.0产物未包含本次信令与JSON补丁。
+QCRT输入布局保持v5/804字节。已冻结0.3.1产物未包含本次信令与JSON补丁。

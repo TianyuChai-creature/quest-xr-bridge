@@ -377,8 +377,14 @@
       const trackingGuides = document.querySelector("#tracking-guides")
       const videoSettings = document.querySelector("#video-settings")
       const videoSettingsStatus = document.querySelector("#video-settings-status")
+      let pendingReceiverStatus = null
+      let receiverRevocationSent = false
       const videoReturn = new VideoReturn({
         onStatus(status) { document.querySelector("#video-status").textContent = status },
+        onReceiverStatus(report) {
+          pendingReceiverStatus = report
+          if (!poseStreaming) sendReceiverRevocation()
+        },
         onConfig(snapshot) {
           if (xrSession) {
             const now = performance.now()
@@ -420,6 +426,17 @@
       let poseSendBlockedAt = null
       let poseRecoveryStartedAt = null
       let videoRecoveryStartedAt = null
+
+      function sendReceiverRevocation() {
+        const report = pendingReceiverStatus
+        if (receiverRevocationSent || !report || !transportIsOpen() || dataChannel.bufferedAmount > 0) return
+        if (report.video_enabled && report.xr_active && report.rendered_eyes.length === 2 &&
+            report.decoded_age_ms !== null && report.decoded_age_ms <= 250 &&
+            report.rendered_age_ms !== null && report.rendered_age_ms <= 100) return
+        dataChannel.send(JSON.stringify({ ...report, pose_seq: seq }))
+        pendingReceiverStatus = null
+        receiverRevocationSent = true
+      }
 
       function transportIsOpen() {
         return dataChannel?.readyState === "open"
@@ -1301,8 +1318,9 @@
           if (xrSession !== session) return
           const renderer = createXRRenderer(gl, glLayer, viewerSpace)
           xrRenderer = renderer
-          videoReturn.setSession(session, glLayer, viewerSpace, gl)
           const sessionId = crypto.randomUUID()
+          receiverRevocationSent = false
+          videoReturn.setSession(session, glLayer, viewerSpace, gl, sessionId)
           seq = 0
           sent = 0
           dropped = 0
@@ -1391,6 +1409,7 @@
               rightShoulder,
               makeXRHud(inPrep, countdownSec, bodyCoordinateFrame, nowMs)
             )
+            videoReturn.endFrame()
 
             // Do not send poses until countdown finished (hands free to pose)
             if (!poseStreaming) {
@@ -1456,6 +1475,11 @@
             }
             rtc.send(encodePosePacket(packet))
             sent += 1
+            receiverRevocationSent = false
+            if (pendingReceiverStatus) {
+              rtc.send(JSON.stringify({ ...pendingReceiverStatus, pose_seq: frameSeq }))
+              pendingReceiverStatus = null
+            }
 
             if (timestamp - lastUiUpdate >= 250) {
               lastUiUpdate = timestamp

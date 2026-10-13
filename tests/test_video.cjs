@@ -13,9 +13,9 @@ function environment({prepareFails = false, drawFails = false, contextLost = fal
       left_intrinsics: calibrated ? {fx: 727, fy: 728, cx: 627, cy: 361} : null,
       right_intrinsics: calibrated ? {fx: 726, fy: 729, cx: 631, cy: 360} : null},
     display: {swap_eyes: false, saturation: 1, gamma: 1, projection}}
-  const callbacks = new Map(), peers = [], requests = [], renderers = [], prepared = [], drawn = []
+  const callbacks = new Map(), peers = [], requests = [], renderers = [], prepared = [], drawn = [], receiverReports = []
   const gl = {isContextLost: () => contextLost}
-  const session = {ended: false}, viewerPose = {views: [{eye: "left"}, {eye: "right"}]}
+  const session = {ended: false, visibilityState: "visible"}, viewerPose = {views: [{eye: "left"}, {eye: "right"}]}
   const frame = {session}, glLayer = {name: "shared pose framebuffer"}
   const video = {videoWidth: 2560, videoHeight: 720, srcObject: null,
     play: async () => {}, pause() {},
@@ -48,7 +48,7 @@ function environment({prepareFails = false, drawFails = false, contextLost = fal
           assert.equal(input, video); prepared.push(stamp)
         },
         drawView(view, cameraView, config, display) {
-          if (drawFails) throw new Error("GPU draw failed")
+          if (drawFails === true || drawFails === view.eye) throw new Error("GPU draw failed")
           drawn.push({view, cameraView, config, display: {...display}})
         },
         dispose() {this.disposed = true},
@@ -71,8 +71,8 @@ function environment({prepareFails = false, drawFails = false, contextLost = fal
   })
   vm.runInContext(source.replace(/^import .*$/gm, "").replace(/^export /gm, "") +
     "\nthis.VideoReturn = VideoReturn; this.offerError = offerError", context)
-  const receiver = new context.VideoReturn()
-  return {receiver, video, peers, requests, renderers, prepared, drawn, session, viewerPose, frame, glLayer, gl,
+  const receiver = new context.VideoReturn({onReceiverStatus: report => receiverReports.push(JSON.parse(JSON.stringify(report)))})
+  return {receiver, video, peers, requests, renderers, prepared, drawn, receiverReports, session, viewerPose, frame, glLayer, gl,
     get snapshot() {return structuredClone(snapshot)}, setSnapshot(value) {snapshot = value},
     failConfig(value) {configFails = value},
     time(value) {now = value}, resolveOffer: () => resolveOffer(), offerError: context.offerError,
@@ -84,7 +84,7 @@ function environment({prepareFails = false, drawFails = false, contextLost = fal
       const [id, callback] = callbacks.entries().next().value
       callbacks.delete(id); callback()
     },
-    start() {receiver.setSession(session, glLayer, {}, gl); receiver.setEnabled(true)},
+    start() {receiver.setSession(session, glLayer, {}, gl, "407b7a3f-4791-479c-aa81-48e813aca057"); receiver.setEnabled(true)},
   }
 }
 
@@ -233,6 +233,63 @@ async function check() {
   assert.equal(hevc.peers[0].codecs[1], codecs[1])
   assert.equal(hevc.peers[0].codecs[2], codecs[0])
   hevc.receiver.close()
+  const reporting = environment()
+  await flush(); reporting.start(); await flush(); reporting.track()
+  reporting.time(50)
+  reporting.receiver.beginFrame(reporting.frame, reporting.viewerPose)
+  reporting.receiver.endFrame()
+  assert.equal(reporting.receiverReports.at(-1).decoded_age_ms, null, "metadata cannot acknowledge decode")
+  assert.deepEqual(reporting.receiverReports.at(-1).rendered_eyes, [])
+  reporting.time(100); reporting.decoded()
+  reporting.receiver.beginFrame(reporting.frame, reporting.viewerPose)
+  reporting.receiver.renderView({eye: "left"}, {eye: "left"})
+  reporting.receiver.endFrame()
+  assert.equal(reporting.receiverReports.at(-1).rendered_age_ms, null, "one eye is insufficient")
+  reporting.time(150); reporting.decoded()
+  reporting.receiver.beginFrame(reporting.frame, reporting.viewerPose)
+  reporting.receiver.renderView({eye: "left"}, {eye: "left"})
+  reporting.receiver.renderView({eye: "right"}, {eye: "right"})
+  const beforeComplete = reporting.receiverReports.length
+  reporting.receiver.endFrame()
+  const complete = reporting.receiverReports.at(-1)
+  assert.equal(complete.type, "video_receiver_status")
+  assert.equal(complete.session_id, "407b7a3f-4791-479c-aa81-48e813aca057")
+  assert.equal(complete.peer_id, reporting.receiver.peerId)
+  assert.equal(complete.stream_generation, 1)
+  assert.equal(complete.xr_active, true)
+  assert.equal(complete.decoded_age_ms, 0)
+  assert.equal(complete.rendered_age_ms, 0)
+  assert.deepEqual(complete.rendered_eyes, ["left", "right"])
+  reporting.time(151); reporting.receiver.endFrame()
+  assert.equal(reporting.receiverReports.length, beforeComplete + 1, "heartbeat is limited to 50 ms")
+  reporting.time(401)
+  reporting.receiver.beginFrame(reporting.frame, reporting.viewerPose)
+  reporting.receiver.endFrame()
+  assert.equal(reporting.receiverReports.at(-1).decoded_age_ms, 251)
+  assert.deepEqual(reporting.receiverReports.at(-1).rendered_eyes, [], "stale decode invalidates render acknowledgement")
+  reporting.session.visibilityState = "visible-blurred"
+  reporting.time(451); reporting.receiver.emitReceiverStatus()
+  assert.equal(reporting.receiverReports.at(-1).xr_active, false, "blurred XR cannot acknowledge an active view")
+  const retiredPeer = reporting.receiver.peerId
+  reporting.receiver.setSession(null)
+  const revoked = reporting.receiverReports.at(-1)
+  assert.equal(revoked.peer_id, retiredPeer, "revocation identifies the retired video peer")
+  assert.equal(revoked.session_id, complete.session_id)
+  assert.equal(revoked.xr_active, false)
+  assert.equal(revoked.rendered_age_ms, null)
+  assert(revoked.status_seq > complete.status_seq)
+  reporting.receiver.close()
+  for (const flags of [{prepareFails: true}, {drawFails: true}, {drawFails: "right"}, {contextLost: true}]) {
+    const broken = environment(flags)
+    await flush(); broken.start(); await flush(); broken.track(); broken.decoded()
+    broken.receiver.beginFrame(broken.frame, broken.viewerPose)
+    broken.receiver.renderView({eye: "left"}, {eye: "left"})
+    broken.receiver.renderView({eye: "right"}, {eye: "right"})
+    broken.receiver.endFrame()
+    assert.deepEqual(broken.receiverReports.at(-1).rendered_eyes, [])
+    assert.equal(broken.receiverReports.at(-1).rendered_age_ms, null)
+    broken.receiver.close()
+  }
   console.log("Calibrated video freshness, paired views, nonce cleanup, reconnect and isolation checks passed")
 }
 check().catch(error => {console.error(error); process.exitCode = 1})

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import json
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,12 +15,14 @@ from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import ValidationError
 
 from quest_xr_bridge.coordinates import COORDINATE_PRESETS, remap_axes
 from quest_xr_bridge.pose import (
     CoordinateTransformRequest,
     PosePeerClose,
     VideoPeerClose,
+    VideoReceiverStatus,
     WebRTCPoseOffer,
     WebRTCVideoOffer,
 )
@@ -109,6 +112,44 @@ async def _report_status(runtime: PoseRuntime) -> None:
             logger.info(format_status_line(runtime.health()))
 
 
+def video_status(runtime: PoseRuntime | None, video: VideoManager, *,
+                 receiver_timeout_s: float = 0.1) -> dict[str, Any]:
+    """Video status with source binding; never a physical-display guarantee."""
+    status = video.snapshot(receiver_timeout_s=receiver_timeout_s)
+    receiver = status["receiver"]
+    _generation, pose, published = (runtime.latest_pose.snapshot() if runtime else (0, None, None))
+    processor = runtime.processors.get(runtime.pose_peer) if runtime else None
+    if (processor is None or pose is None or published is None
+            or processor.connection_id != receiver.get("ingress_connection_id")
+            or time.monotonic()-published >= receiver_timeout_s
+            or receiver.get("session_id") != pose.get("session_id")
+            or receiver.get("ingress_connection_id") != pose.get("ingress_connection_id")):
+        receiver.update(valid=False, reason="pose_source_unavailable_or_changed")
+    return status
+
+
+def receive_video_status(runtime: PoseRuntime, video: VideoManager,
+                         peer: RTCPeerConnection, payload: dict[str, Any]) -> bool:
+    processor = runtime.processors.get(peer)
+    if runtime.pose_peer is not peer or processor is None:
+        return False
+    try:
+        report = VideoReceiverStatus.model_validate(payload)
+    except ValidationError:
+        return False
+    _generation, pose, published = runtime.latest_pose.snapshot()
+    if report.session_id is not None:
+        if (pose is None or published is None or time.monotonic()-published >= 0.1
+                or str(report.session_id) != pose.get("session_id")
+                or pose.get("ingress_connection_id") != processor.connection_id
+                or abs(report.timestamp_ms-pose["timestamp_ms"]) > 100
+                or report.pose_seq == 0 or abs(report.pose_seq-pose["seq"]) > 8):
+            return False
+    elif report.xr_active:
+        return False
+    return video.report_receiver(report.model_dump(mode="json"), processor.connection_id)
+
+
 def create_app(runtime: PoseRuntime, video: VideoManager) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -137,7 +178,7 @@ def create_app(runtime: PoseRuntime, video: VideoManager) -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
-        return {**runtime.health(), "video": video.snapshot()}
+        return {**runtime.health(), "video": video_status(runtime, video)}
 
     @app.get("/api/coordinate-transform")
     async def get_transform() -> dict[str, Any]:
@@ -159,9 +200,13 @@ def create_app(runtime: PoseRuntime, video: VideoManager) -> FastAPI:
         runtime.coordinates.configure(name, transform)
         return runtime.coordinates.describe()
 
+    @app.get("/api/video/status")
+    async def get_video_status() -> dict[str, Any]:
+        return video_status(runtime, video)
+
     @app.get("/api/video/config")
     async def get_video() -> dict[str, Any]:
-        return video.snapshot()
+        return video_status(runtime, video)
 
     @app.put("/api/video/config")
     async def set_video(update: dict[str, Any]) -> dict[str, Any]:
@@ -170,7 +215,7 @@ def create_app(runtime: PoseRuntime, video: VideoManager) -> FastAPI:
             video.set_display(display)
         except (TypeError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
-        return video.snapshot()
+        return video_status(runtime, video)
 
     @app.post("/api/video/offer")
     async def video_offer(offer: WebRTCVideoOffer) -> dict[str, str]:
@@ -251,6 +296,14 @@ def create_app(runtime: PoseRuntime, video: VideoManager) -> FastAPI:
 
             @channel.on("message")
             def on_message(message: str | bytes) -> None:
+                if isinstance(message, str) and len(message) <= 4096:
+                    try:
+                        payload = json.loads(message)
+                    except (ValueError, RecursionError):
+                        return
+                    if isinstance(payload, dict) and payload.get("type") == "video_receiver_status":
+                        receive_video_status(runtime, video, peer, payload)
+                        return
                 processor.process(message, time.time_ns() / 1e6, time.monotonic_ns() / 1e6)
 
             @channel.on("close")

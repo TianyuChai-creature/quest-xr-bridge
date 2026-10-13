@@ -174,6 +174,7 @@ class VideoManager:
         self._worker_stats: dict[str, Any] = {}
         self._worker_exit_code: int | None = None
         self._worker_exit_forced_cleanup = False
+        self._receiver_status: dict[str, Any] | None = None
 
     def start(self, config: VideoConfig, timeout: float = 10) -> None:
         previous = (self._reader, self._stderr_reader)
@@ -629,7 +630,25 @@ class VideoManager:
         with self._lock:
             self._display = config
 
-    def snapshot(self) -> dict[str, Any]:
+    def report_receiver(self, report: dict[str, Any], ingress_connection_id: str) -> bool:
+        """Accept only ordered reports from the current ingress/video generations."""
+        with self._lock:
+            if report["stream_generation"] != self._stream_generation:
+                return False
+            peer_id = report["peer_id"]
+            if peer_id is not None and (peer_id != self._worker_peer_id
+                                       or peer_id in self._cancelled_peer_ids):
+                return False
+            previous = self._receiver_status
+            if (previous is not None and previous["ingress_connection_id"] == ingress_connection_id
+                    and report["status_seq"] <= previous["status_seq"]):
+                return False
+            self._receiver_status = {**report, "ingress_connection_id": ingress_connection_id,
+                                     "received_monotonic": time.monotonic()}
+            return True
+
+    def snapshot(self, *, receiver_timeout_s: float = 0.1) -> dict[str, Any]:
+        self._check_timeout(receiver_timeout_s)
         with self._lock:
             running = self._enabled and self._memory is not None
             worker_running = self._process is not None and self._process.poll() is None
@@ -661,6 +680,37 @@ class VideoManager:
                     negotiation_stage_age_ms=None,
                     last_capture_timestamp_ns=None,
                 )
+            report = self._receiver_status
+            receiver = {"valid": False, "reason": "not_reported", "report_age_ms": None,
+                        "timeout_ms": receiver_timeout_s * 1000,
+                        "evidence": "browser_decode_and_draw_report"}
+            if report is not None:
+                now = time.monotonic()
+                age_ms = max(0.0, (now-report["received_monotonic"]) * 1000)
+                receiver.update(report, report_age_ms=age_ms)
+                receiver["decoded_age_ms"] = (None if report["decoded_age_ms"] is None
+                                              else report["decoded_age_ms"] + age_ms)
+                receiver["rendered_age_ms"] = (None if report["rendered_age_ms"] is None
+                                               else report["rendered_age_ms"] + age_ms)
+                if (not running or not worker_running or not self._worker_ready
+                        or report["stream_generation"] != self._stream_generation
+                        or report["peer_id"] is None or report["peer_id"] != self._worker_peer_id
+                        or report["peer_id"] in self._cancelled_peer_ids):
+                    reason = "video_unavailable"
+                elif age_ms >= receiver_timeout_s * 1000:
+                    reason = "report_timeout"
+                elif not report["video_enabled"] or not report["xr_active"]:
+                    reason = "receiver_inactive"
+                elif (receiver["decoded_age_ms"] is None or receiver["decoded_age_ms"] > 250
+                        or snapshot["frame_age_ms"] is None or snapshot["frame_age_ms"] > 250):
+                    reason = "decoded_or_source_stale"
+                elif (receiver["rendered_age_ms"] is None or receiver["rendered_age_ms"] > 100
+                        or set(report["rendered_eyes"]) != {"left", "right"}):
+                    reason = "render_unavailable"
+                else:
+                    reason = "ok"
+                receiver.update(valid=reason == "ok", reason=reason)
+            snapshot["receiver"] = receiver
             return snapshot
 
     @staticmethod

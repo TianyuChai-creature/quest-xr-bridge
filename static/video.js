@@ -32,9 +32,10 @@ function hasGeometry(snapshot) {
 }
 
 export class VideoReturn {
-  constructor({ onStatus = () => {}, onConfig = () => {} } = {}) {
+  constructor({ onStatus = () => {}, onConfig = () => {}, onReceiverStatus = () => {} } = {}) {
     this.onStatus = onStatus
     this.onConfig = onConfig
+    this.onReceiverStatus = onReceiverStatus
     this.video = document.createElement("video")
     this.video.muted = true
     this.video.playsInline = true
@@ -45,6 +46,12 @@ export class VideoReturn {
     this.frameReady = false
     this.attempt = 0
     this.lastFrameAt = null
+    this.lastRenderedAt = null
+    this.renderedEyes = new Set()
+    this.lastRenderedEyes = []
+    this.sessionId = null
+    this.receiverStatusSeq = 0
+    this.lastReceiverReportAt = -Infinity
     this.sourceKey = null
     this.retryAt = 0
     this.closed = false
@@ -58,13 +65,15 @@ export class VideoReturn {
     if (!enabled) this.disconnect()
     this.connectIfReady()
     this.tick()
+    this.emitReceiverStatus(true)
   }
 
-  setSession(session, glLayer = null, viewerSpace = null, gl = null) {
+  setSession(session, glLayer = null, viewerSpace = null, gl = null, sessionId = null) {
     this.session = null
     this.disconnect()
     this.binding?.dispose()
     this.session = session
+    this.sessionId = session ? sessionId : null
     this.glLayer = glLayer
     this.viewerSpace = viewerSpace
     this.gl = gl
@@ -255,6 +264,7 @@ export class VideoReturn {
 
   beginFrame(frame, viewerPose) {
     this.frameReady = false
+    this.renderedEyes.clear()
     if (!this.enabled || !this.session || !this.binding || this.capabilityError ||
         frame.session !== this.session || !viewerPose ||
         !this.snapshot?.enabled || !this.snapshot.running || this.lastFrameAt === null ||
@@ -274,8 +284,34 @@ export class VideoReturn {
 
   renderView(view, cameraView) {
     if (!this.frameReady || !cameraView) return
-    try { this.binding.drawView(view, cameraView, this.snapshot.config, this.snapshot.display) }
+    try {
+      this.binding.drawView(view, cameraView, this.snapshot.config, this.snapshot.display)
+      this.renderedEyes.add(view.eye)
+    }
     catch (error) { this.failVideo(error) }
+  }
+
+  endFrame() {
+    this.lastRenderedEyes = this.frameReady && this.renderedEyes.has("left") && this.renderedEyes.has("right")
+      ? ["left", "right"] : []
+    if (this.lastRenderedEyes.length === 2) this.lastRenderedAt = performance.now()
+    this.emitReceiverStatus()
+  }
+
+  emitReceiverStatus(force = false) {
+    const now = performance.now()
+    if (!force && now - this.lastReceiverReportAt < 50) return
+    this.lastReceiverReportAt = now
+    this.onReceiverStatus({
+      type: "video_receiver_status", status_seq: ++this.receiverStatusSeq,
+      session_id: this.sessionId, peer_id: this.peerId ?? null,
+      stream_generation: this.snapshot?.stream_generation ?? 0,
+      timestamp_ms: now, video_enabled: this.enabled,
+      xr_active: !!this.session && this.session.visibilityState === "visible",
+      decoded_age_ms: this.lastFrameAt === null ? null : Math.max(0, now - this.lastFrameAt),
+      rendered_age_ms: this.lastRenderedAt === null ? null : Math.max(0, now - this.lastRenderedAt),
+      rendered_eyes: [...this.lastRenderedEyes], status: (this.status || "").slice(0, 256),
+    })
   }
 
   failVideo(error) {
@@ -297,7 +333,6 @@ export class VideoReturn {
   disconnect() {
     this.attempt += 1
     const peerId = this.peerId
-    this.peerId = null
     if (peerId) fetch("/api/video/close", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ peer_id: peerId }), keepalive: true,
@@ -313,7 +348,12 @@ export class VideoReturn {
     this.video.srcObject?.getTracks().forEach(track => track.stop())
     this.video.srcObject = null
     this.lastFrameAt = null
+    this.lastRenderedAt = null
+    this.renderedEyes.clear()
+    this.lastRenderedEyes = []
     this.frameReady = false
+    this.emitReceiverStatus(true)
+    this.peerId = null
   }
 
   close() {

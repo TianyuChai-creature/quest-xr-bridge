@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 import unittest
 from types import SimpleNamespace
@@ -98,6 +99,23 @@ class PoseReconnectTests(unittest.IsolatedAsyncioTestCase):
         frame["seq"] = seq
         processor._process(encode_pose_packet(frame), 1, 1)
         return processor, channel
+
+    async def test_receiver_status_is_routed_without_counting_as_a_pose(self):
+        await self.connect(1)
+        peer=self.runtime.pose_peer
+        processor,channel=self.publish(peer,9)
+        payload={"type":"video_receiver_status","status_seq":1}
+        with patch("quest_xr_bridge.server.receive_video_status") as receiver, \
+             patch.object(processor,"process") as pose:
+            channel.handlers["message"](json.dumps(payload))
+            receiver.assert_called_once_with(self.runtime,unittest.mock.ANY,peer,payload)
+            pose.assert_not_called()
+            with patch("quest_xr_bridge.server.json.loads", side_effect=RecursionError):
+                channel.handlers["message"]("nested JSON")
+            pose.assert_not_called()
+            packet=encode_pose_packet(pose_frame_v5())
+            channel.handlers["message"](packet)
+            self.assertEqual(pose.call_args.args[0],packet)
 
     async def test_same_page_replaces_live_source_while_old_transport_cleanup_waits(self):
         await self.connect(1)

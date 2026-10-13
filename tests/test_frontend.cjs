@@ -7,8 +7,8 @@ async function checkPose() {
   const html = fs.readFileSync(path.join(__dirname, "../static/index.html"), "utf8")
   const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)[1]
     .replace(/^\s*import .*$/m, "").replace(/\s+connectTransport\(\)\s*$/, "")
-  let now = 0, loseCount = 0, disposeCount = 0, failGL = false
-  const events = {}, sessions = [], packets = [], rendered = [], videoInstances = [], drawOrder = []
+  let now = 0, loseCount = 0, disposeCount = 0, failGL = false, fillSendBuffer = false
+  const events = {}, sessions = [], packets = [], channelMessages = [], rendered = [], videoInstances = [], drawOrder = []
   const elements = new Map()
   function element() {
     return { textContent: "", disabled: false, checked: false, events: {},
@@ -21,7 +21,11 @@ async function checkPose() {
     getExtension: () => ({ loseContext() { loseCount++ } }) }
   const posePeer = { close() { this.closed = true } }
   const poseChannel = { readyState: "open", bufferedAmount: 0,
-    send(packet) { packets.push(packet) }, close() { this.closed = true } }
+    send(packet) {
+      channelMessages.push(packet)
+      if (typeof packet !== "string") packets.push(packet)
+      if (fillSendBuffer) this.bufferedAmount = 804
+    }, close() { this.closed = true } }
   const context = vm.createContext({ console, performance: { now: () => now, timeOrigin: 1000 },
     crypto: { randomUUID: () => "407b7a3f-4791-479c-aa81-48e813aca057" },
     setTimeout, clearTimeout, AbortController, AbortSignal,
@@ -35,13 +39,23 @@ async function checkPose() {
     window: { addEventListener(name, handler) { events[name] = handler } },
     location: { reload() {} },
     VideoReturn: class {
-      constructor({ onStatus, onConfig }) { this.onStatus = onStatus; this.onConfig = onConfig; this.enabled = false; videoInstances.push(this) }
+      constructor({ onStatus, onConfig, onReceiverStatus }) {
+        this.onStatus = onStatus; this.onConfig = onConfig; this.onReceiverStatus = onReceiverStatus
+        this.enabled = false; videoInstances.push(this)
+      }
       setEnabled(enabled) { this.enabled = enabled }
       setStatus(status) { this.status = status; this.onStatus(status) }
       tick() {}
       beginFrame(frame) { this.frame = frame; drawOrder.push("video prepare") }
       renderView() { drawOrder.push("video") }
-      setSession(session, layer, space, context) { this.session = session; this.gl = context }
+      endFrame() { drawOrder.push("video report") }
+      setSession(session, layer, space, context, sessionId) {
+        this.session = session; this.gl = context
+        if (!session) this.onReceiverStatus({type: "video_receiver_status", status_seq: 3,
+          session_id: this.sessionId, video_enabled: this.enabled, xr_active: false,
+          decoded_age_ms: null, rendered_age_ms: null, rendered_eyes: []})
+        this.sessionId = sessionId
+      }
       close() { this.closed = true }
     },
     XRWebGLLayer: class {
@@ -104,14 +118,27 @@ async function checkPose() {
   now = 2999; session.frame(now, frame)
   assert.equal(videoInstances[0].gl, gl, "video shares the existing XR WebGL context")
   assert.equal(videoInstances[0].frame, frame)
-  assert.deepEqual(drawOrder, ["video prepare", "pose"], "prepare the paired video frame before pose/HUD rendering")
+  assert.deepEqual(drawOrder, ["video prepare", "pose", "video report"], "report after pose/HUD rendering")
   const renderSource = html.slice(html.indexOf("const cameraPose ="), html.indexOf("function cleanupXR"))
   assert(renderSource.indexOf("videoReturn.renderView(view, cameraView)") < renderSource.indexOf("drawVertices(lineVertices"))
   assert(renderSource.includes("candidate.eye === view.eye"))
   assert(renderSource.includes("trackingGuides.checked || !videoMode.checked"))
   assert.equal(packets.length, 0, "three-second preparation sends no pose")
+  const pending = {type: "video_receiver_status", status_seq: 1,
+    session_id: videoInstances[0].sessionId, video_enabled: true, xr_active: true,
+    decoded_age_ms: 0, rendered_age_ms: 0, rendered_eyes: ["left", "right"]}
+  videoInstances[0].onReceiverStatus(pending)
+  assert.equal(channelMessages.length, 0, "positive status waits for a corresponding pose")
+  fillSendBuffer = true
   now = 3001; session.frame(now, frame)
+  fillSendBuffer = false; poseChannel.bufferedAmount = 0
   assert.equal(packets.length, 1)
+  assert.equal(channelMessages.length, 2)
+  assert.equal(channelMessages[0], packets[0], "binary pose has priority over the report")
+  const reported = JSON.parse(channelMessages[1])
+  assert.equal(reported.type, "video_receiver_status")
+  assert.equal(reported.pose_seq, new DataView(packets[0]).getUint32(8, true))
+  assert.equal(reported.session_id, "407b7a3f-4791-479c-aa81-48e813aca057")
   assert.equal(packets[0].byteLength, 804)
   assert.equal(new DataView(packets[0]).getUint8(5) & 0x80, 0)
   now = 3100; session.frame(now, { ...frame, body: undefined })
@@ -167,6 +194,10 @@ async function checkPose() {
   now = 13611; session.frame(now, frame)
   assert.equal(rendered.at(-1).show, false)
   await session.end()
+  const afterExit = channelMessages.length
+  assert.equal(JSON.parse(channelMessages.at(-1)).xr_active, false, "XR exit sends a one-off revocation")
+  video.onReceiverStatus({ ...pending, status_seq: 4, xr_active: false, rendered_eyes: [] })
+  assert.equal(channelMessages.length, afterExit, "idle negative reports cannot periodically occupy the pose channel")
   assert.equal(videoInstances[0].session, null)
   assert.equal(disposeCount, 1)
   assert.equal(loseCount, 1)

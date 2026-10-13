@@ -131,6 +131,37 @@ class WebRTCVideoOffer(WebRTCOffer):
         return VideoPeerClose.bounded_peer_id(value)
 
 
+class VideoReceiverStatus(BaseModel):
+    """Small, strictly typed browser report on the existing pose data channel."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["video_receiver_status"]
+    status_seq: int = Field(strict=True, ge=1, le=2**53 - 1)
+    session_id: UUID | None
+    peer_id: UUID | None
+    stream_generation: int = Field(strict=True, ge=0, le=2**53 - 1)
+    pose_seq: int = Field(strict=True, ge=0, le=0xFFFFFFFF)
+    timestamp_ms: Annotated[FiniteFloat, Field(ge=0, strict=True)]
+    video_enabled: bool = Field(strict=True)
+    xr_active: bool = Field(strict=True)
+    decoded_age_ms: Annotated[FiniteFloat, Field(ge=0, strict=True)] | None
+    rendered_age_ms: Annotated[FiniteFloat, Field(ge=0, strict=True)] | None
+    rendered_eyes: list[Literal["left", "right"]] = Field(max_length=2)
+    status: str = Field(max_length=256)
+
+    @field_validator("peer_id", "session_id", mode="before")
+    @classmethod
+    def bounded_uuid(cls, value):
+        return None if value is None else VideoPeerClose.bounded_peer_id(value)
+
+    @field_validator("rendered_eyes")
+    @classmethod
+    def distinct_eyes(cls, value):
+        if len(set(value)) != len(value):
+            raise ValueError("rendered eyes must be distinct")
+        return value
+
+
 class WebRTCPoseOffer(WebRTCOffer):
     client_token: UUID | None = None
     attempt_id: int | None = Field(default=None, strict=True, ge=1, le=2**53 - 1)

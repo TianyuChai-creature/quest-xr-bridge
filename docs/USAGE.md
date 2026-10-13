@@ -1,13 +1,13 @@
-# Quest XR Bridge 0.3.0 使用文档
+# Quest XR Bridge 0.3.1 使用文档
 
 ## 1. 安装
 
 基础姿态 SDK 需要 Python 3.13+，支持手部/身体追踪的 Quest Browser 和互通局域网。
-从仓库 v0.3.0 Release 下载 wheel、文档包和 SHA256SUMS。校验与安装：
+从仓库 v0.3.1 Release 下载 wheel、文档包和 SHA256SUMS。校验与安装：
 
 ```bash
 sha256sum -c SHA256SUMS
-python -m pip install quest_xr_bridge-0.3.0-py3-none-any.whl
+python -m pip install quest_xr_bridge-0.3.1-py3-none-any.whl
 quest-xr-bridge
 ```
 
@@ -87,7 +87,7 @@ Quest 访问 `/`，点击 **Start prep**，三秒后发送姿态。身体锚点�
 
 当前源码提供可测试的参考门控 [pose_consumer.py](../examples/pose_consumer.py)，
 随下一次wheel构建包含在 `quest_xr_bridge.examples`；QCRT输入格式和SDK公共控制接口保持现有版本。
-已冻结的0.3.0发布产物尚不包含此补丁。上层接法如下：
+已冻结的0.3.1发布产物尚不包含此补丁。上层接法如下：
 
 ```python
 import time
@@ -287,8 +287,12 @@ peer_connected、frame_age_ms和实际接收统计共同判断视频是否在更
 
 ```bash
 python -m pip uninstall quest-crt
-python -m pip install quest_xr_bridge-0.3.0-py3-none-any.whl
+python -m pip install quest_xr_bridge-0.3.1-py3-none-any.whl
 ```
 
 网络上的QCRT v5名称与804字节布局不因项目更名而改变。
 原生插件构建标记仍为 `quest-crt DTLS owner fix`，它是已验证构建的兼容契约，不是发行包名。
+
+## 头显侧视频状态（0.3.1）
+
+使用 `service.video_status()["receiver"]` 或 `GET /api/video/status`。状态每约50ms随姿态连接回传，默认100ms收包超时失效；用session_id、ingress_connection_id匹配当前控制来源。PC worker存活不能代替receiver.valid。此接口仅表示浏览器报告的解码/绘制路径，实际头显、黑屏内容和端到端延迟仍需现场验收。字段、来源绑定及工程阈值见 [API](API.md)。
