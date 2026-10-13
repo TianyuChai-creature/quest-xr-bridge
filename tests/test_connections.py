@@ -41,7 +41,7 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
             await client.close()
 
     async def test_live_old_peer_is_replaced_without_waiting_for_ice_failure(self):
-        from examples.pose_consumer import PoseConsumerGate
+        from quest_xr_bridge.examples.pose_consumer import PoseConsumerGate
 
         runtime = PoseRuntime()
         app = create_app(runtime, VideoManager())
