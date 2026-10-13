@@ -1,0 +1,40 @@
+{
+  "version": "0.3.1+stage2.1",
+  "source_build_commit": "28c6fe3720f7fdf57b710b0ee05d1451704c6594",
+  "source_base_sha": "940b9ed831a538db8b6c15d1e172dc6a93ed782d",
+  "source_diff_sha256": "d085b81a6ad0beea2be5596eb1a6c3a2f24e31b67f82eecc6788b4b06baa647d",
+  "source_tree_clean_at_build": true,
+  "uncommitted": false,
+  "wheel": "quest_xr_bridge-0.3.1+stage2.1-py3-none-any.whl",
+  "wheel_sha256": "6a82f0ac442a2a883625e9467d629de54931114945fb8fd65b003d9710f06658",
+  "build_command": "uv build --python 3.13 --wheel --out-dir dist/stage2.1",
+  "python": "3.13.8 (main, Oct  7 2025, 15:35:51) [Clang 20.1.4 ]",
+  "python_implementation": "cpython",
+  "free_threaded": false,
+  "uv": "0.11.16",
+  "wheel_generator": "Wheel-Version: 1.0\nGenerator: hatchling 1.32.4\nRoot-Is-Purelib: true\nTag: py3-none-any",
+  "platform": "Linux-6.14.0-36-generic-x86_64-with-glibc2.39",
+  "libc": [
+    "glibc",
+    "2.39"
+  ],
+  "release_tag": "v0.3.1+stage2.1",
+  "release_url": "https://github.com/TianyuChai-creature/quest-xr-bridge/releases/tag/v0.3.1+stage2.1",
+  "validation": {
+    "python_targeted_tests": {
+      "test_driving_authority.py": 7,
+      "test_pose_reconnect.py": 9,
+      "test_protocol.py": 9,
+      "test_connections.py": 3
+    },
+    "frontend": "node tests/test_frontend.cjs passed",
+    "native_video": "not verified",
+    "physical_quest": "not verified",
+    "camera": "not opened",
+    "robots": "not connected"
+  },
+  "superseded_local_draft": {
+    "wheel_sha256": "a6946ace2637dfaf67107486ba1a934b4b21794ec4709a26a4ef017b0ad12a0c",
+    "source_diff_sha256": "d195c802e7650df1eb44978778900df44de89de853c85eea49af3fb840bb96a4"
+  }
+}
