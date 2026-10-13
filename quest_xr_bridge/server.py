@@ -16,6 +16,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
+from quest_xr_bridge.driving import DrivingEvent
 
 from quest_xr_bridge.coordinates import COORDINATE_PRESETS, remap_axes
 from quest_xr_bridge.pose import (
@@ -180,6 +181,28 @@ def create_app(runtime: PoseRuntime, video: VideoManager) -> FastAPI:
     async def health() -> dict[str, Any]:
         return {**runtime.health(), "video": video_status(runtime, video)}
 
+    @app.get("/api/driving/authority")
+    async def driving_authority():
+        return runtime.driving.snapshot()
+
+    @app.post("/api/driving/exit")
+    async def driving_exit(body: dict, request: Request):
+        try:
+            event=DrivingEvent.model_validate(body)
+        except ValidationError as exc:
+            raise HTTPException(422,"invalid driving event") from exc
+        if event.event!="exit":raise HTTPException(422,"this endpoint only revokes")
+        if str(event.server_epoch) != runtime.driving.snapshot()["server_epoch"]:
+            return {"revoked": False}
+        if event.client_token is not None:
+            # Current attempt or a just-closed page can revoke; retired attempts cannot.
+            if runtime.pose_attempts.get(event.client_token) != event.attempt_id:
+                return {"revoked": False}
+            return {"revoked": runtime.driving.receive(event, str(event.client_token))}
+        if event.reason != "operator_stop" or request.client is None or request.client.host not in ("127.0.0.1", "::1"):
+            raise HTTPException(403, "host STOP requires a loopback client")
+        return {"revoked": runtime.driving.revoke(event.session_id, event.authorization_id)}
+
     @app.get("/api/coordinate-transform")
     async def get_transform() -> dict[str, Any]:
         return runtime.coordinates.describe()
@@ -301,6 +324,17 @@ def create_app(runtime: PoseRuntime, video: VideoManager) -> FastAPI:
                         payload = json.loads(message)
                     except (ValueError, RecursionError):
                         return
+                    if isinstance(payload, dict) and payload.get("type") == "driving_event":
+                        if runtime.pose_peer is not peer or runtime.processors.get(peer) is not processor:
+                            return
+                        try:
+                            event=DrivingEvent.model_validate(payload)
+                        except ValidationError:
+                            return
+                        owner, attempt = runtime.peer_claims.get(peer, (None, None))
+                        if owner is not None and (event.client_token, event.attempt_id) == (owner, attempt):
+                            runtime.driving.receive(event, str(owner))
+                        return
                     if isinstance(payload, dict) and payload.get("type") == "video_receiver_status":
                         receive_video_status(runtime, video, peer, payload)
                         return
@@ -324,7 +358,8 @@ def create_app(runtime: PoseRuntime, video: VideoManager) -> FastAPI:
             async with runtime.pose_lock:
                 if runtime.pose_peer is not peer:
                     raise HTTPException(409, "pose attempt was superseded")
-            return {"sdp": peer.localDescription.sdp, "type": peer.localDescription.type}
+            return {"sdp": peer.localDescription.sdp, "type": peer.localDescription.type,
+                    "server_epoch": runtime.driving.snapshot()["server_epoch"]}
         except HTTPException:
             await close_pose_peer(runtime, peer, wait=False)
             raise
@@ -352,6 +387,7 @@ def create_app(runtime: PoseRuntime, video: VideoManager) -> FastAPI:
         subscription, event = runtime.notifier.subscribe()
         event.set()
         last_generation = -1
+        last_driving_generation = -1
         receive = asyncio.create_task(websocket.receive())
         update: asyncio.Task[bool] | None = None
         try:
@@ -370,9 +406,13 @@ def create_app(runtime: PoseRuntime, video: VideoManager) -> FastAPI:
                     continue
                 event.clear()
                 generation, text = runtime.output_snapshot()
-                if text is None or generation == last_generation:
-                    continue
+                driving = runtime.driving.snapshot()
                 try:
+                    if driving["generation"] != last_driving_generation:
+                        await asyncio.wait_for(websocket.send_json(driving), timeout=0.25)
+                        last_driving_generation = driving["generation"]
+                    if text is None or generation == last_generation:
+                        continue
                     await asyncio.wait_for(websocket.send_text(text), timeout=0.25)
                 except TimeoutError:
                     with contextlib.suppress(TimeoutError):

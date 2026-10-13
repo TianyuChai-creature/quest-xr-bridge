@@ -29,7 +29,8 @@ async function checkPose() {
   const context = vm.createContext({ console, performance: { now: () => now, timeOrigin: 1000 },
     crypto: { randomUUID: () => "407b7a3f-4791-479c-aa81-48e813aca057" },
     setTimeout, clearTimeout, AbortController, AbortSignal,
-    document: { activeElement: null,
+    document: { activeElement: null, hidden: false,
+      addEventListener(name, handler) { events[name] = handler },
       querySelector(selector) {
         if (!elements.has(selector)) elements.set(selector, element())
         return elements.get(selector)
@@ -37,6 +38,7 @@ async function checkPose() {
       createElement: () => ({ ...element(), id: "", getContext: () => gl }),
     },
     window: { addEventListener(name, handler) { events[name] = handler } },
+    fetch: async () => ({ok: true}),
     location: { reload() {} },
     VideoReturn: class {
       constructor({ onStatus, onConfig, onReceiverStatus }) {
@@ -89,7 +91,7 @@ async function checkPose() {
     posePeer, poseChannel,
     rendererFactory: () => ({ render(...args) { drawOrder.push("pose"); rendered.push(args.at(-1)) }, dispose() { disposeCount++ } }),
   })
-  vm.runInContext(script + "\ncreateXRRenderer = rendererFactory; dataChannel = poseChannel; peerConnection = posePeer", context)
+  vm.runInContext(script + "\ncreateXRRenderer = rendererFactory; dataChannel = poseChannel; peerConnection = posePeer; drivingServerEpoch = '407b7a3f-4791-479c-aa81-48e813aca057'; poseClaim = {client_token: poseClientToken, attempt_id: 1}", context)
   await vm.runInContext("Promise.all([enterXR(), enterXR()])", context)
   assert.equal(sessions.length, 1, "duplicate taps request only one XR session")
   const session = sessions[0]
@@ -133,9 +135,14 @@ async function checkPose() {
   now = 3001; session.frame(now, frame)
   fillSendBuffer = false; poseChannel.bufferedAmount = 0
   assert.equal(packets.length, 1)
-  assert.equal(channelMessages.length, 2)
+  assert.equal(channelMessages.length, 3)
   assert.equal(channelMessages[0], packets[0], "binary pose has priority over the report")
-  const reported = JSON.parse(channelMessages[1])
+  const grant = JSON.parse(channelMessages[1])
+  assert.equal(grant.type, "driving_event")
+  assert.equal(grant.event, "enter")
+  assert.equal(grant.server_epoch, "407b7a3f-4791-479c-aa81-48e813aca057")
+  assert.equal(grant.attempt_id, 1)
+  const reported = JSON.parse(channelMessages[2])
   assert.equal(reported.type, "video_receiver_status")
   assert.equal(reported.pose_seq, new DataView(packets[0]).getUint32(8, true))
   assert.equal(reported.session_id, "407b7a3f-4791-479c-aa81-48e813aca057")
@@ -195,6 +202,7 @@ async function checkPose() {
   assert.equal(rendered.at(-1).show, false)
   await session.end()
   const afterExit = channelMessages.length
+  assert(channelMessages.some(m => typeof m === "string" && JSON.parse(m).reason === "xr_end"))
   assert.equal(JSON.parse(channelMessages.at(-1)).xr_active, false, "XR exit sends a one-off revocation")
   video.onReceiverStatus({ ...pending, status_seq: 4, xr_active: false, rendered_eyes: [] })
   assert.equal(channelMessages.length, afterExit, "idle negative reports cannot periodically occupy the pose channel")
@@ -213,8 +221,14 @@ async function checkPose() {
   await vm.runInContext("enterXR()", context)
   assert(sessions[2].renderState.baseLayer instanceof context.XRWebGLLayer)
   assert.equal(sessions[2].renderState.layers, undefined)
-  await sessions[2].end()
+  vm.runInContext("document.hidden = true", context)
+  events.visibilitychange()
+  assert.equal(sessions[2].ended, true)
+  assert(channelMessages.some(m => typeof m === "string" && JSON.parse(m).reason === "page_hidden"))
+  vm.runInContext("document.hidden = false", context)
+  await vm.runInContext("enterXR()", context)
   events.pagehide()
+  assert.equal(sessions[3].ended, true)
   assert.equal(posePeer.closed, true)
   assert.equal(poseChannel.closed, true)
   assert.equal(videoInstances[0].closed, true)
@@ -315,7 +329,7 @@ async function checkPoseReconnect() {
       calls.push({ url, body, keepalive: options.keepalive })
       if (url.endsWith("close")) throw new Error("offline close notification")
       if (body.attempt_id === 3) await new Promise(resolve => { releaseOffer = resolve })
-      return { ok: !rejectOffer, json: async () => ({ sdp: "answer", type: "answer" }) }
+      return { ok: !rejectOffer, json: async () => ({ sdp: "answer", type: "answer", server_epoch: token }) }
     },
   })
   vm.runInContext(source + "\nxrSession = session; seq = 42", context)

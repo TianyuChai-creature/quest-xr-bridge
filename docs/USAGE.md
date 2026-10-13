@@ -59,19 +59,19 @@ Quest 访问 `/`，点击 **Start prep**，三秒后发送姿态。身体锚点�
 
 | 条件 | 消费端行为 |
 |---|---|
-| 启动、尚未有新姿态 | 两手均不允许输出控制命令，等待新数据及用户确认 |
+| 启动、尚未有新姿态 | 两手均不允许输出控制命令，等待有效新数据与明确驾驶授权 |
 | 某手 `tracked=false` | 立即撤销该手许可；不沿用上一帧坐标，不用另一只手的状态代替 |
 | 距有效新帧收包达到50ms | 告警，上层进入项目定义的降速策略；不通过缓存旧帧消除告警 |
 | 达到100ms、连接中断或系统故障 | 进入保持，锁定许可；保持的具体执行方式由机器人控制器定义 |
 | 同一session内seq有跳号 | 接纳较新的有效帧；latest-only允许跳号，不补发或重放缺失帧 |
-| seq重复、回退或帧校验失败 | 丢弃，不刷新新鲜度；撤销许可，等待后续有效新帧与用户确认 |
-| session改变、上层确认来源改变或消费连接重连 | 清理旧样本/序号基线并锁定；同session重连也不自动恢复授权 |
+| seq重复、回退或帧校验失败 | 丢弃，不刷新新鲜度；撤销许可，等待后续有效新帧；授权不由姿态产生 |
+| session改变、上层确认来源改变或消费连接重连 | 清理旧样本/序号基线并锁定；同一已授权XR重建来源后可由宿主自动限速恢复，新XR需明确进入驾驶 |
 | 坐标约定或机器人映射改变 | 上层按来源改变处理，重新校验和确认 |
-| 跟踪、数据和故障状态恢复 | 只恢复“可确认”条件；用户明确确认后才恢复对应手的许可 |
+| 跟踪、数据和故障状态恢复 | 只恢复输入条件；real-teleop在同一已授权XR内自动恢复，新会话、STOP与硬故障遵循各自恢复边界 |
 
 双臂耦合任务可由上层把单手故障提升为整体保持。头、肘、肩等控制依赖的部位
 还须分别满足其 `tracked` 和数据校验条件；双手有效不意味着其他部位有效。
-不要把 `confirm()` 放在每帧处理、自动重连或定时任务中。
+参考gate本身不授予驾驶权。宿主只能在同一已授权XR且所需追踪/视频有效时，调用confirm重建本地许可；普通pose、重连和健康消息不能建立驾驶授权。
 
 当前源码的 `/ws` JSON新增 `ingress_connection_id`：服务端为每个已建立的姿态源生成
 独立UUID，随该源的每个有效新帧输出。`session_id` 在同一个XRSession的姿态重连期间
@@ -196,7 +196,7 @@ plane投影不需要K；双目校正仍由外部完成。
 ## 5. 视频原生部署
 
 视频支持Linux/NVIDIA硬编。wheel只含Python、网页和补丁，不包含GPU驱动、GStreamer或GI。
-主SDK用Python3.13+；独立worker默认 `/usr/bin/python3`，需能import GI，亦可指定worker_python。
+real-teleop宿主与独立worker均使用标准CPython3.13（非3.13t），由宿主显式传sys.executable；不可借用Ubuntu默认3.12的python3-gi。SDK通用API的worker_python默认值不作为本集成的部署配置。
 
 Ubuntu24.04的基础组件可安装为：
 
@@ -208,7 +208,7 @@ sudo apt install python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0   g
 发行版包不保证包含全部功能；SDK在启用视频时检查插件并真实试编码，缺项明确报错，不回退软件编码。
 
 部署的webrtcbin必须是GStreamer1.24.13或兼容更高版本，并应用
-`quest_xr_bridge/patches/gstreamer-webrtc-dtls-owner.patch`。本次实际验证版本为1.24.13。
+`quest_xr_bridge/patches/gstreamer-webrtc-dtls-owner.patch`。该版本来自历史SDK视频验证；本次STAGE2仅离线测试，原生部署和头显尚未重验。
 在对应gst-plugins-bad源码根目录应用补丁，并在Meson构建中设置：
 
 ```bash

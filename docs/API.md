@@ -1,6 +1,6 @@
-# Quest XR Bridge 0.3.1 Python SDK API
+# Quest XR Bridge 0.3.1+stage2.1 Python SDK API
 
-安装发行包 `quest-xr-bridge`，导入模块 `quest_xr_bridge`。本文对应0.3.1 wheel的公共接口。
+安装发行包 `quest-xr-bridge`，导入模块 `quest_xr_bridge`。本文对应基于0.3.1源码的stage2.1本地兼容构建，驾驶扩展见本文末尾。
 数据通过SDK的HTTPS/WSS/WebRTC服务消费；QuestServer没有隐含的相机驱动或机器人控制器。
 
 ## QuestServer
@@ -256,7 +256,7 @@ AxisTransform提供matrix、determinant、changes_handedness只读属性，
 | attempt_id | 严格整数，1至2^53−1 | 同页面每次协商递增，识别过期/取消请求 |
 
 缺少整对字段的旧请求仍支持初次连接，不具备接管能力；只提供一个字段或字段非法返回422。
-返回仍仅含 `sdp` 和 `type="answer"`。相同凭据的更高代次撤销旧连接再预留新连接；
+返回 `sdp`、`type="answer"` 和本次服务的 `server_epoch`。相同凭据的更高代次撤销旧连接再预留新连接；
 其他来源占用、过期/取消代次或协商被新请求替换返回409，detail区分原因。
 旧源停止发布的暂行预算为1秒，超时503；失败时不建立第二个活动源。
 SDP协商和未完成数据通道握手仍各有10秒限制，不作为已建立旧peer的失联判定。
@@ -270,5 +270,42 @@ close和offer的源撤销/预留串行化，后台资源收尾不占用信令锁
 
 `WSS /ws` JSON附加 `ingress_connection_id`（服务端生成的UUID），每个姿态源连接不同，
 同源帧之间不变。它在下一有效新帧中反映来源切换，不是即时失效事件。
-消费者必须在编号变化时锁定许可，并继续执行收包超时与用户确认规则。
+消费者必须在编号变化时暂停并重建姿态来源；同一已授权 XR 内的新鲜输入可自动限速恢复，不需人体对齐或返回 PC 确认。
 QCRT输入布局保持v5/804字节。已冻结0.3.1产物未包含本次信令与JSON补丁。
+
+
+## STAGE1 驾驶授权事件（0.3.1+stage1.3 本地兼容构建）
+
+点击 Quest 的“进入驾驶 / Start prep”后，为该 XR session 建立独立
+`authorization_id`。RTC `driving_event` 包含 `event=enter|exit`、UUID
+`session_id` / `authorization_id`、严格递增 `seq`、`reason`。
+`XRSession.end`、页面隐藏/pagehide 尽力发送退出：RTC 与
+`POST /api/driving/exit`；退出通知不保证必达。PC STOP 也可调用
+`QuestServer.revoke_driving(session_id, authorization_id)`，该接口只撤销。
+`GET /api/driving/authority` 与 `/ws` 返回 `driving_authority`：
+`server_epoch`、`generation`、`active`、会话与授权 ID、原因。
+姿态、视频及传输健康不授予驾驶权限。同一授权同一 XR 的网络重连保留
+授权；结束后旧授权不能复活，新 XR 必须明确点击进入。50/100ms
+新鲜度与最终发送门控仍由消费端监督，恢复限速追随当前人体。
+
+离线只验证浏览器 XR end/visibilitychange/pagehide 的事件契约。
+Quest 系统“右手掌面对自己对指、退出 web app”实际触发什么事件未现场验证，
+这是软件停止入口候选，不是物理急停。若退出通知丢失且会话结束没有证据，
+PC 无法从单纯断流区分临时断网与主动退出：先超时保持，同一会话数据恢复
+仍按授权恢复。新会话无旧授权。
+
+## STAGE2 授权乱序修复（0.3.1+stage2.1 本地兼容构建）
+
+seq 在同一页面的所有 XR 会话中递增，不在新 XR 归零；旧 entry 序号被拒绝。
+每个 driving_event 必须包含信令返回的 server_epoch、页面 client_token 与当前 attempt_id。
+RTC 只接受当前 peer/claim；HTTP 页面退出只接受已登记的最新 claim；PC 负向 STOP
+通过 loopback HTTP（同一 server_epoch）或 SDK revoke_driving 调用。该 token 是随机
+能力凭据，不是设备认证；只在信任网络部署，不在 WSS/健康快照公开。
+
+来源合法的退出即使早于 enter，也撤销该 session_id + authorization_id。
+撤销另一授权不会改变当前活动授权。重复退出幂等，迟到 enter 永不复活。
+撤销集合保留至整个服务 epoch 结束，没有 64 条淘汰；服务重启生成新 epoch，
+旧事件被拒绝。内存随本次服务结束的授权数量增长（每次 XR 一项），不能删除仍
+可能通过 HTTP/重连迟到的记录。旧页面 claim 淘汰后不能 HTTP 撤销，负向记录
+仍保留；重新接入也不能恢复已结束的授权。同 XR 正常 ingress/WSS 重连不撤销。
+退出通知全丢时仍无法区分临时失联与主动退出；控制端超时 HOLD，新 XR 必须明确进入。

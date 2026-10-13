@@ -282,6 +282,9 @@ class QuestServer:
     def set_video_display(self, config: VideoDisplayConfig) -> None:
         self._video.set_display(config)
 
+    def revoke_driving(self, session_id, authorization_id):
+        return False if self._runtime is None else self._runtime.driving.revoke(session_id, authorization_id)
+
     def video_status(self, *, receiver_timeout_s: float = 0.1) -> dict:
         """Snapshot receiver reports and sender state without starting video/hardware."""
         return video_status(self._runtime, self._video, receiver_timeout_s=receiver_timeout_s)

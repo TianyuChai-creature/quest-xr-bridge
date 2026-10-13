@@ -39,6 +39,9 @@ class PoseProtocolTests(unittest.TestCase):
                 ("GET", "/"),
                 ("GET", "/viewer"),
                 ("GET", "/health"),
+                ("GET", "/api/video/status"),
+                ("GET", "/api/driving/authority"),
+                ("POST", "/api/driving/exit"),
                 ("GET", "/api/video/config"),
                 ("PUT", "/api/video/config"),
                 ("GET", "/api/coordinate-transform"),
@@ -237,6 +240,9 @@ class PoseWebRTCIntegrationTests(unittest.IsolatedAsyncioTestCase):
         try:
             async with asyncio.timeout(15):
                 self.assertEqual((await outgoing.get())["type"], "websocket.accept")
+                authority = json.loads((await outgoing.get())["text"])
+                self.assertEqual(authority["type"], "driving_authority")
+                self.assertFalse(authority["active"])
                 await client.setLocalDescription(await client.createOffer())
                 status, answer = await http(
                     "POST",
@@ -247,7 +253,7 @@ class PoseWebRTCIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     },
                 )
                 self.assertEqual(status, 200)
-                await client.setRemoteDescription(RTCSessionDescription(**answer))
+                await client.setRemoteDescription(RTCSessionDescription(sdp=answer["sdp"], type=answer["type"]))
                 await opened.wait()
                 processors.extend(runtime.processors.values())
                 frame = pose_frame_v5()

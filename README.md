@@ -26,11 +26,11 @@
 
 ## 安装与启动
 
-基础功能需要 Python 3.13+。从 [v0.3.1 Release](https://github.com/TianyuChai-creature/quest-xr-bridge/releases/tag/v0.3.1)
+基础功能需要 Python 3.13+。从 [v0.3.1+stage2.1 Release](https://github.com/TianyuChai-creature/quest-xr-bridge/releases/tag/v0.3.1+stage2.1)
 下载 wheel 后安装：
 
 ```bash
-python -m pip install quest_xr_bridge-0.3.1-py3-none-any.whl
+python -m pip install quest_xr_bridge-0.3.1+stage2.1-py3-none-any.whl
 quest-xr-bridge
 ```
 
@@ -102,7 +102,7 @@ with QuestServer() as service:
 - [相对 main 的改造说明](docs/reference/REFACTOR.md)：基线124ae02、决策及兼容性变化。
 - [冻结与验收结论](docs/reference/ACCEPTANCE.md)：实测范围、冻结参数及未完成项。
 - [通用双目示例](examples/frozen_stereo.py)：与相机品牌无关的参考预处理。
-- [姿态消费许可契约](docs/USAGE.md#消费许可契约暂行)：每手授权、暂行50ms告警/100ms保持、故障锁定和用户确认；[参考门控](examples/pose_consumer.py)。
+- [姿态消费许可契约](docs/USAGE.md#消费许可契约暂行)：每手授权、暂行50ms告警/100ms保持、输入保持和显式驾驶会话授权；[参考门控](examples/pose_consumer.py)。
 
 ## 开发检查
 
@@ -111,9 +111,11 @@ uv sync
 uv run python -m unittest discover -s tests -v
 node --test tests/*.cjs
 uv run python scripts/check_runtime_contracts.py --ca certs/cert.pem --inject
-uv build --wheel --out-dir dist/v0.3.1
+uv build --python 3.13 --wheel --out-dir dist/stage2.1
 ```
 
 `--inject` 需要已启动服务且没有实际 Quest 占用姿态连接；验证固定协议与通用输出。
 实际 GPU 渲染回归需要 Node、Linux Mesa/EGL，否则该项明确跳过。
 本项目面向可信局域网；应用层鉴权和机器人安全控制由部署方负责。
+
+STAGE2 兼容构建绑定 server_epoch 与页面 claim，并保留退出 tombstone 至服务代次结束，关闭 exit-before-enter 乱序边界。详见 [API](docs/API.md)。

@@ -199,6 +199,8 @@ class PoseRuntime:
         self.retention = LogRetentionManager(self.log_dir, LOG_RETENTION_MAX_BYTES)
         self.active_source = ActivePoseSource()
         self.notifier = RelayUpdateNotifier()
+        from quest_xr_bridge.driving import DrivingAuthority
+        self.driving = DrivingAuthority(self.notifier)
         self.latest_pose = LatestPose(self.notifier)
         self.coordinates = CoordinateTransformState()
         self.ingress = IngressTelemetry()

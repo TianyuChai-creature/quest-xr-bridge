@@ -423,6 +423,10 @@
       let sessionPhase = "idle"
       let prepDeadlineMs = 0
       let poseStreaming = false
+      let drivingServerEpoch = null
+      let drivingGrant = null
+      let drivingSeq = 0
+      let drivingSentAt = -Infinity
       let poseSendBlockedAt = null
       let poseRecoveryStartedAt = null
       let videoRecoveryStartedAt = null
@@ -436,6 +440,19 @@
         dataChannel.send(JSON.stringify({ ...report, pose_seq: seq }))
         pendingReceiverStatus = null
         receiverRevocationSent = true
+      }
+
+      function sendDriving(event, reason, rtc = dataChannel) {
+        if (!drivingGrant) return
+        const message = {type: "driving_event", event, reason, ...drivingGrant, ...poseClaim, seq: ++drivingSeq}
+        if (rtc?.readyState === "open") {
+          try { rtc.send(JSON.stringify(message)) } catch (_) {}
+        }
+        if (event === "exit") {
+          fetch("/api/driving/exit", {method: "POST", headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(message), keepalive: true}).catch(() => {})
+          drivingGrant = null
+        }
       }
 
       function transportIsOpen() {
@@ -480,7 +497,7 @@
             enterButton.textContent = "Waiting for PC"
             setSessionPhase("idle")
           } else {
-            enterButton.textContent = "Start prep"
+            enterButton.textContent = "进入驾驶 / Start prep"
             setSessionPhase("ready")
           }
         }
@@ -576,7 +593,8 @@
         if (!response.ok) throw await offerError(response, "Pose offer rejected")
         const answer = await response.json()
         if (attempt !== connectionAttempt || pageLeaving) return
-        await peer.setRemoteDescription(answer)
+        drivingServerEpoch = answer.server_epoch
+        await peer.setRemoteDescription({sdp: answer.sdp, type: answer.type})
         await waitForDataChannelOpen(channel)
         if (attempt !== connectionAttempt) throw new Error("superseded connection")
 
@@ -1247,6 +1265,7 @@
 
       function cleanupXR(session) {
         if (xrSession !== session) return
+        sendDriving("exit", "xr_end")
         xrSession = null
         poseStreaming = false
         poseSendBlockedAt = null
@@ -1319,6 +1338,9 @@
           const renderer = createXRRenderer(gl, glLayer, viewerSpace)
           xrRenderer = renderer
           const sessionId = crypto.randomUUID()
+          if (!drivingServerEpoch) throw new Error("Pose server epoch unavailable; reconnect before entering driving")
+          drivingGrant = {session_id: sessionId, authorization_id: crypto.randomUUID(), server_epoch: drivingServerEpoch}
+          drivingSentAt = -Infinity
           receiverRevocationSent = false
           videoReturn.setSession(session, glLayer, viewerSpace, gl, sessionId)
           seq = 0
@@ -1474,6 +1496,10 @@
               },
             }
             rtc.send(encodePosePacket(packet))
+            if (drivingGrant && performance.now() - drivingSentAt >= 50) {
+              sendDriving("enter", "enter_click", rtc)
+              drivingSentAt = performance.now()
+            }
             sent += 1
             receiverRevocationSent = false
             if (pendingReceiverStatus) {
@@ -1497,7 +1523,7 @@
           xrStatus.textContent = `XR start failed: ${error instanceof Error ? error.message : error}`
           setSessionPhase(transportIsOpen() ? "ready" : "idle")
           enterButton.disabled = !transportIsOpen()
-          enterButton.textContent = transportIsOpen() ? "Start prep" : "Waiting for PC"
+          enterButton.textContent = transportIsOpen() ? "进入驾驶 / Start prep" : "Waiting for PC"
           if (prepHintEl) prepHintEl.classList.remove("hidden")
         } finally {
           xrEntering = false
@@ -1530,7 +1556,15 @@
           button.disabled = false
         }
       })
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden && drivingGrant) {
+          sendDriving("exit", "page_hidden")
+          poseStreaming = false
+          xrSession?.end().catch(() => {})
+        }
+      })
       window.addEventListener("pagehide", () => {
+        sendDriving("exit", "page_hidden")
         pageLeaving = true
         clearTimeout(reconnectTimer)
         closeCurrentTransport()
