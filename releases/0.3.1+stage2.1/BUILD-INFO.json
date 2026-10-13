@@ -1,8 +1,8 @@
 {
   "version": "0.3.1+stage2.1",
-  "source_build_commit": "921e09bd8a65370660b283804dda26acb60fd771",
+  "source_build_commit": "add9b9ac91fbfa0ef3ea5ab4ab022699646476aa",
   "source_base_sha": "940b9ed831a538db8b6c15d1e172dc6a93ed782d",
-  "source_diff_sha256": "6c0d475fe37512c074e79b41293bea822371f90ef55f99f5f2eeaecccccedb78",
+  "source_diff_sha256": "861a47cc947e5407dec739577e8ab6eade8f8f0ccc4f4f7779f7e27f50f2f8f1",
   "source_diff_scope": "all source paths, excluding releases products",
   "source_tree_clean_at_build": true,
   "uncommitted": false,
@@ -32,7 +32,11 @@
     "native_video": "not verified",
     "physical_quest": "not verified",
     "camera": "not opened",
-    "robots": "not connected"
+    "robots": "not connected",
+    "installed_wheel_files_verified": 25,
+    "installed_protocol_tests": 9,
+    "installed_reconnect_tests": 3,
+    "install_environment": "standard CPython 3.13.8; /tmp/stage2-quest-install; cwd outside SDK source"
   },
   "superseded_local_draft": {
     "wheel_sha256": "a6946ace2637dfaf67107486ba1a934b4b21794ec4709a26a4ef017b0ad12a0c",
